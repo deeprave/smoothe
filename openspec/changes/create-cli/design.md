@@ -16,7 +16,11 @@ so future checker work can fill in behavior behind a stable dispatch boundary.
 - Use `clap` as the parser for global options and subcommands.
 - Provide global `--help`, `--version`, and color control flags.
 - Accept both `--color` and `--colour` spellings for color behavior.
+- Provide short aliases `-h` for help, `-V` for version, and `-c` for color.
+- Use `clap::ColorChoice` with `Auto` as the default, including `NOCOLOR`
+  environment support and `--no-color` as a negating flag.
 - Dispatch the parsed `check` command to a dedicated `check` function.
+- Require `smoothe check` explicitly; do not make `check` the default command.
 - Keep the `check` command argument surface intentionally minimal until its
   requirements are specified.
 - Keep CLI parsing, command dispatch, and check command handling separated enough
@@ -43,23 +47,30 @@ Alternative considered: build commands manually with `clap::Command`. The manual
 builder API is flexible, but the derive API is clearer for the small initial
 surface and makes command handler inputs explicit.
 
-### Model color as a global option with US and UK aliases
+### Model color with `clap::ColorChoice`
 
 Expose a single parsed color setting while accepting both `--color` and
 `--colour` on the command line. The implementation should use one canonical
-field name internally and configure the alternate spelling as an alias, so the
-rest of the code does not care which spelling the user typed.
+field name internally, configure the alternate spelling as an alias, and use
+`clap::ColorChoice` with `Auto` as the default. The parser should also support
+`-c` as the short form, `--no-color` as a negating flag, and the `NOCOLOR`
+environment variable for color-disabled behavior.
 
 Alternative considered: define two separate fields and reconcile them after
 parsing. That adds conflict behavior and validation code with no meaningful
 benefit for this initial surface.
+
+Alternative considered: define a project-specific color enum. `ColorChoice`
+already expresses the standard clap behavior this CLI needs, so a custom enum
+would add translation code without clarifying the public interface.
 
 ### Keep dispatch explicit
 
 After parsing, the entry point should call a dispatcher that matches on the
 subcommand enum and invokes the relevant command handler. For this change,
 `check` should call a `check` function that returns success without performing
-real checking.
+real checking. There should be no default command; invoking the checker requires
+the explicit `smoothe check` subcommand.
 
 Alternative considered: put command behavior directly in `main`. That is
 adequate for one command but would mix parsing, dispatch, and behavior at the
@@ -77,9 +88,10 @@ first check-specific argument is added.
 
 ## Risks / Trade-offs
 
-- [Risk] The color option semantics may be under-specified at implementation
-  time. -> Mitigation: choose `clap`'s conventional color value handling and
-  defer output styling behavior until diagnostics exist.
+- [Risk] `--color`, `--colour`, `-c`, `--no-color`, and `NOCOLOR` can create
+  precedence ambiguity. -> Mitigation: keep one canonical parsed color field and
+  rely on `clap::ColorChoice` conventions, with explicit parser tests for the
+  supported invocation forms.
 - [Risk] The stubbed `check` command may look complete even though it performs no
   validation. -> Mitigation: keep the handler behavior minimal and cover only
   parser/dispatch expectations in this change.

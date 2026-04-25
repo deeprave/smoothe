@@ -10,10 +10,26 @@ The system SHALL provide a `clap`-backed command-line parser with global
 - **WHEN** the user runs `smoothe --help`
 - **THEN** the CLI displays help text and exits successfully.
 
+#### Scenario: Help output is available with short alias
+
+- **WHEN** the user runs `smoothe -h`
+- **THEN** the CLI displays help text and exits successfully.
+
 #### Scenario: Version output is available
 
 - **WHEN** the user runs `smoothe --version`
 - **THEN** the CLI displays version text and exits successfully.
+
+#### Scenario: Version output is available with short alias
+
+- **WHEN** the user runs `smoothe -V`
+- **THEN** the CLI displays version text and exits successfully.
+
+#### Scenario: Color option defaults to automatic behavior
+
+- **WHEN** the user runs `smoothe check` without a color option or color
+  environment override
+- **THEN** the CLI uses `clap`'s `ColorChoice::Auto` setting.
 
 #### Scenario: Color option accepts US spelling
 
@@ -27,6 +43,24 @@ The system SHALL provide a `clap`-backed command-line parser with global
 - **THEN** the CLI parses the color option as the same internal setting used by
   `--color` before dispatching the `check` command.
 
+#### Scenario: Color option accepts short alias
+
+- **WHEN** the user runs `smoothe -c <value> check`
+- **THEN** the CLI parses the color option as the same internal setting used by
+  `--color` before dispatching the `check` command.
+
+#### Scenario: Color output can be disabled with flag
+
+- **WHEN** the user runs `smoothe --no-color check`
+- **THEN** the CLI parses the color setting as disabled before dispatching the
+  `check` command.
+
+#### Scenario: Color output can be disabled with environment
+
+- **WHEN** the user runs `smoothe check` with `NOCOLOR` set in the environment
+- **THEN** the CLI uses color-disabled behavior unless an explicit color option
+  overrides it.
+
 ### Requirement: Command Dispatch
 
 The system SHALL dispatch parsed subcommands through an explicit command
@@ -36,6 +70,11 @@ dispatcher rather than embedding command behavior directly in argument parsing.
 
 - **WHEN** the user runs `smoothe check`
 - **THEN** the dispatcher invokes the check command handler.
+
+#### Scenario: No default command is dispatched
+
+- **WHEN** the user runs `smoothe` without a subcommand
+- **THEN** the CLI does not invoke the check command handler.
 
 ### Requirement: Check Command Stub
 
