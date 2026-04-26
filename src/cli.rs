@@ -26,10 +26,14 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     Check(CheckArgs),
+    Parse(ParseArgs),
 }
 
 #[derive(Debug, Parser)]
 pub struct CheckArgs {}
+
+#[derive(Debug, Parser)]
+pub struct ParseArgs {}
 
 impl Cli {
     fn color_choice(&self) -> ColorChoice {

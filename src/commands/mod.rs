@@ -1,4 +1,5 @@
 pub mod check;
+pub mod parse;
 
 use std::process::ExitCode;
 
@@ -10,5 +11,6 @@ pub fn dispatch(command: Commands) -> ExitCode {
             check::check(args);
             ExitCode::SUCCESS
         }
+        Commands::Parse(args) => parse::parse(args),
     }
 }
