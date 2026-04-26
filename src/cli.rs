@@ -43,6 +43,9 @@ pub struct CheckArgs {
 
 #[derive(Debug, Parser)]
 pub struct ParseArgs {
+    #[arg(long, short = 'j')]
+    pub json: bool,
+
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
 

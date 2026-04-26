@@ -6,6 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use serde_json::Value;
+
 fn smoothe() -> Command {
     Command::new(env!("CARGO_BIN_EXE_smoothe"))
 }
@@ -16,6 +18,10 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn json_stdout(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("parse JSON stdout")
 }
 
 fn smoothe_with_stdin(args: &[&str], stdin: &str) -> Output {
@@ -148,6 +154,175 @@ fn parse_command_accepts_file_operands_and_prints_compact_ast() {
     assert!(stdout.contains("escaped_variable name=\"name\" span="));
     assert!(!stdout.contains("EscapedVariable {"));
     assert!(stderr(&output).is_empty());
+}
+
+#[test]
+fn parse_command_json_flag_prints_valid_json() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "Hello {{name}}");
+    let output = smoothe()
+        .arg("parse")
+        .arg("--json")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+
+    assert!(output.status.success());
+    assert!(stderr(&output).is_empty());
+    assert_eq!(json["inputs"][0]["name"], "valid.mustache");
+    assert!(json["inputs"][0]["ast"]["nodes"].is_array());
+}
+
+#[test]
+fn parse_command_short_json_flag_prints_json() {
+    let output = smoothe_with_stdin(&["parse", "-j", "-"], "Hello {{name}}");
+    let json = json_stdout(&output);
+
+    assert!(output.status.success());
+    assert_eq!(json["inputs"][0]["name"], "<stdin>");
+    assert_eq!(json["inputs"][0]["errors"], Value::Array(Vec::new()));
+    assert_eq!(json["inputs"][0]["warnings"], Value::Array(Vec::new()));
+}
+
+#[test]
+fn parse_command_json_output_contains_all_inputs() {
+    let dir = temp_dir();
+    let first = write_template(&dir, "first.mustache", "first {{name}}");
+    let second = write_template(&dir, "second.mustache", "second {{value}}");
+    let output = smoothe()
+        .arg("parse")
+        .arg("--json")
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+    let inputs = json["inputs"].as_array().expect("inputs array");
+
+    assert!(output.status.success());
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0]["name"], "first.mustache");
+    assert_eq!(inputs[1]["name"], "second.mustache");
+}
+
+#[test]
+fn parse_command_json_represents_empty_ast() {
+    let output = smoothe_with_stdin(&["parse", "--json", "-"], "");
+    let json = json_stdout(&output);
+
+    assert!(output.status.success());
+    assert_eq!(json["inputs"][0]["ast"]["nodes"], Value::Array(Vec::new()));
+}
+
+#[test]
+fn parse_command_json_writes_output_file() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "Hello {{name}}");
+    let output_path = dir.join("parse.json");
+    let output = smoothe()
+        .arg("parse")
+        .arg("--json")
+        .arg("--out")
+        .arg(&output_path)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json: Value =
+        serde_json::from_str(&fs::read_to_string(&output_path).expect("read JSON output"))
+            .expect("parse JSON output file");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(json["inputs"][0]["name"], "valid.mustache");
+}
+
+#[test]
+fn parse_command_without_json_keeps_compact_tree_output() {
+    let output = smoothe_with_stdin(&["parse", "-"], "Hello {{name}}");
+    let stdout = stdout(&output);
+
+    assert!(output.status.success());
+    assert!(stdout.starts_with("input <stdin>\n"));
+    assert!(stdout.contains("escaped_variable name=\"name\""));
+    assert!(serde_json::from_str::<Value>(&stdout).is_err());
+}
+
+#[test]
+fn parse_command_json_projects_scalar_and_container_nodes() {
+    let output = smoothe_with_stdin(
+        &["parse", "--json", "-"],
+        "Hello {{name}}{{#items}}{{.}}{{/items}}",
+    );
+    let json = json_stdout(&output);
+    let nodes = json["inputs"][0]["ast"]["nodes"]
+        .as_array()
+        .expect("nodes array");
+
+    assert!(output.status.success());
+    assert_eq!(nodes[0]["kind"], "text");
+    assert_eq!(nodes[0]["text"], "Hello ");
+    assert_eq!(nodes[0]["span"]["start"], 0);
+    assert_eq!(nodes[0]["span"]["end"], 6);
+    assert_eq!(nodes[1]["kind"], "escaped_variable");
+    assert_eq!(nodes[1]["name"], "name");
+    assert_eq!(nodes[2]["kind"], "section");
+    assert_eq!(nodes[2]["name"], "items");
+    assert_eq!(nodes[2]["children"][0]["kind"], "escaped_variable");
+    assert_eq!(nodes[2]["children"][0]["name"], ".");
+}
+
+#[test]
+fn parse_command_json_groups_errors_and_warnings() {
+    let warning = smoothe_with_stdin(
+        &["parse", "--json", "-"],
+        include_str!("../fixtures/parse-warning.mustache"),
+    );
+    let warning_json = json_stdout(&warning);
+    let error = smoothe_with_stdin(
+        &["parse", "--json", "-"],
+        include_str!("../fixtures/parse-invalid.mustache"),
+    );
+    let error_json = json_stdout(&error);
+
+    assert!(warning.status.success());
+    assert!(stderr(&warning).is_empty());
+    assert_eq!(
+        warning_json["inputs"][0]["warnings"][0]["issue"],
+        "FrontmatterParseError"
+    );
+    assert_eq!(
+        warning_json["inputs"][0]["warnings"][0]["source"],
+        "<stdin>"
+    );
+    assert_eq!(warning_json["inputs"][0]["warnings"][0]["line"], 1);
+    assert_eq!(warning_json["inputs"][0]["warnings"][0]["column"], 1);
+    assert!(
+        warning_json["inputs"][0]["warnings"][0]["message"]
+            .as_str()
+            .expect("warning message")
+            .contains("frontmatter")
+    );
+    assert_eq!(
+        warning_json["inputs"][0]["errors"],
+        Value::Array(Vec::new())
+    );
+
+    assert!(!error.status.success());
+    assert!(stderr(&error).is_empty());
+    assert_eq!(
+        error_json["inputs"][0]["errors"][0]["issue"],
+        "UnclosedSection"
+    );
+    assert_eq!(error_json["inputs"][0]["errors"][0]["source"], "<stdin>");
+    assert_eq!(error_json["inputs"][0]["errors"][0]["line"], 4);
+    assert_eq!(error_json["inputs"][0]["errors"][0]["column"], 7);
+    assert!(error_json["inputs"][0]["errors"][0]["span"]["start"].is_number());
+    assert_eq!(
+        error_json["inputs"][0]["warnings"],
+        Value::Array(Vec::new())
+    );
 }
 
 #[test]

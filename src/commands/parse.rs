@@ -1,7 +1,8 @@
 use std::{fs, process::ExitCode};
 
+use serde::Serialize;
 use smoothe::parser::{
-    Ast, DiagnosticSeverity, Node, ParserInput, SourceMetadata, TemplateName,
+    Ast, Diagnostic, DiagnosticSeverity, Node, ParserInput, SourceMetadata, TemplateName,
     parse as parse_template,
 };
 
@@ -20,6 +21,7 @@ pub fn parse(args: ParseArgs) -> ExitCode {
 
     let mut diagnostics_output = String::new();
     let mut ast_output = String::new();
+    let mut json_inputs = Vec::new();
     let mut has_error = false;
 
     for input in inputs {
@@ -28,12 +30,20 @@ pub fn parse(args: ParseArgs) -> ExitCode {
             &input.source,
         ));
 
-        for diagnostic in &result.state.diagnostics {
-            diagnostics_output.push_str(&format_diagnostic(diagnostic));
-            diagnostics_output.push('\n');
-        }
+        if args.json {
+            json_inputs.push(JsonInputResult::new(
+                input.name.clone(),
+                &result.ast,
+                &result.state.diagnostics,
+            ));
+        } else {
+            for diagnostic in &result.state.diagnostics {
+                diagnostics_output.push_str(&format_diagnostic(diagnostic));
+                diagnostics_output.push('\n');
+            }
 
-        ast_output.push_str(&format_ast(&input.name, &result.ast));
+            ast_output.push_str(&format_ast(&input.name, &result.ast));
+        }
 
         has_error |= result
             .state
@@ -42,18 +52,38 @@ pub fn parse(args: ParseArgs) -> ExitCode {
             .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
     }
 
-    if let Some(path) = args.out {
+    let output = if args.json {
+        match serde_json::to_string_pretty(&JsonParseOutput {
+            inputs: json_inputs,
+        }) {
+            Ok(mut output) => {
+                output.push('\n');
+                output
+            }
+            Err(error) => {
+                eprintln!("error: failed to serialize JSON output: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
         let mut output = String::new();
         output.push_str(&diagnostics_output);
         output.push_str(&ast_output);
+        output
+    };
 
+    if let Some(path) = args.out {
         if let Err(error) = fs::write(&path, output) {
             eprintln!("error: failed to write {}: {error}", path.display());
             return ExitCode::FAILURE;
         }
     } else {
-        eprint!("{diagnostics_output}");
-        print!("{ast_output}");
+        if args.json {
+            print!("{output}");
+        } else {
+            eprint!("{diagnostics_output}");
+            print!("{ast_output}");
+        }
     }
 
     if has_error {
@@ -61,6 +91,262 @@ pub fn parse(args: ParseArgs) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+#[derive(Serialize)]
+struct JsonParseOutput {
+    inputs: Vec<JsonInputResult>,
+}
+
+#[derive(Serialize)]
+struct JsonInputResult {
+    name: String,
+    ast: JsonAst,
+    errors: Vec<JsonDiagnostic>,
+    warnings: Vec<JsonDiagnostic>,
+}
+
+impl JsonInputResult {
+    fn new(name: String, ast: &Ast, diagnostics: &[Diagnostic]) -> Self {
+        Self {
+            name,
+            ast: JsonAst::from(ast),
+            errors: diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error)
+                .map(JsonDiagnostic::from)
+                .collect(),
+            warnings: diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+                .map(JsonDiagnostic::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonAst {
+    nodes: Vec<JsonNode>,
+}
+
+impl From<&Ast> for JsonAst {
+    fn from(ast: &Ast) -> Self {
+        Self {
+            nodes: ast.nodes.iter().map(JsonNode::from).collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonSpan {
+    start: usize,
+    end: usize,
+}
+
+impl From<&std::ops::Range<usize>> for JsonSpan {
+    fn from(span: &std::ops::Range<usize>) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
+impl From<smoothe::parser::SourceSpan> for JsonSpan {
+    fn from(span: smoothe::parser::SourceSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonDiagnostic {
+    issue: String,
+    source: String,
+    line: usize,
+    column: usize,
+    span: JsonSpan,
+    message: String,
+}
+
+impl From<&Diagnostic> for JsonDiagnostic {
+    fn from(diagnostic: &Diagnostic) -> Self {
+        Self {
+            issue: diagnostic.issue.as_str().to_owned(),
+            source: diagnostic.source_name.clone(),
+            line: diagnostic.location.line,
+            column: diagnostic.location.column,
+            span: JsonSpan::from(diagnostic.span),
+            message: diagnostic.message.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JsonNode {
+    Text {
+        text: String,
+        span: JsonSpan,
+    },
+    EscapedVariable {
+        name: String,
+        span: JsonSpan,
+    },
+    LambdaVariable {
+        name: String,
+        span: JsonSpan,
+    },
+    UnescapedVariable {
+        name: String,
+        span: JsonSpan,
+    },
+    Comment {
+        text: String,
+        span: JsonSpan,
+    },
+    Section {
+        name: String,
+        span: JsonSpan,
+        children: Vec<JsonNode>,
+    },
+    LambdaSection {
+        name: String,
+        span: JsonSpan,
+        children: Vec<JsonNode>,
+    },
+    InvertedSection {
+        name: String,
+        span: JsonSpan,
+        children: Vec<JsonNode>,
+    },
+    Partial {
+        name: String,
+        span: JsonSpan,
+    },
+    DynamicPartial {
+        expression: String,
+        span: JsonSpan,
+    },
+    Parent {
+        name: JsonTemplateName,
+        span: JsonSpan,
+        children: Vec<JsonNode>,
+    },
+    Block {
+        name: String,
+        span: JsonSpan,
+        children: Vec<JsonNode>,
+    },
+    DelimiterChange {
+        open: String,
+        close: String,
+        span: JsonSpan,
+    },
+}
+
+impl From<&Node> for JsonNode {
+    fn from(node: &Node) -> Self {
+        match node {
+            Node::Text { text, span } => Self::Text {
+                text: text.clone(),
+                span: JsonSpan::from(span),
+            },
+            Node::EscapedVariable { name, span } => Self::EscapedVariable {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+            },
+            Node::LambdaVariable { name, span } => Self::LambdaVariable {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+            },
+            Node::UnescapedVariable { name, span } => Self::UnescapedVariable {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+            },
+            Node::Comment { text, span } => Self::Comment {
+                text: text.clone(),
+                span: JsonSpan::from(span),
+            },
+            Node::Section {
+                name,
+                span,
+                children,
+            } => Self::Section {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+                children: children.iter().map(JsonNode::from).collect(),
+            },
+            Node::LambdaSection {
+                name,
+                span,
+                children,
+            } => Self::LambdaSection {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+                children: children.iter().map(JsonNode::from).collect(),
+            },
+            Node::InvertedSection {
+                name,
+                span,
+                children,
+            } => Self::InvertedSection {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+                children: children.iter().map(JsonNode::from).collect(),
+            },
+            Node::Partial { name, span } => Self::Partial {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+            },
+            Node::DynamicPartial { expression, span } => Self::DynamicPartial {
+                expression: expression.clone(),
+                span: JsonSpan::from(span),
+            },
+            Node::Parent {
+                name,
+                span,
+                children,
+            } => Self::Parent {
+                name: JsonTemplateName::from(name),
+                span: JsonSpan::from(span),
+                children: children.iter().map(JsonNode::from).collect(),
+            },
+            Node::Block {
+                name,
+                span,
+                children,
+            } => Self::Block {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+                children: children.iter().map(JsonNode::from).collect(),
+            },
+            Node::DelimiterChange { open, close, span } => Self::DelimiterChange {
+                open: open.clone(),
+                close: close.clone(),
+                span: JsonSpan::from(span),
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum JsonTemplateName {
+    Static(String),
+    Dynamic(String),
+}
+
+impl From<&TemplateName> for JsonTemplateName {
+    fn from(name: &TemplateName) -> Self {
+        match name {
+            TemplateName::Static(value) => Self::Static(value.clone()),
+            TemplateName::Dynamic(value) => Self::Dynamic(value.clone()),
+        }
+    }
 }
 
 fn format_ast(input_name: &str, ast: &Ast) -> String {

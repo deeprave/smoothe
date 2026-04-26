@@ -19,6 +19,22 @@ pub enum IssueKind {
     MalformedDynamicName,
 }
 
+impl IssueKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MalformedTag => "MalformedTag",
+            Self::MismatchedClosingTag => "MismatchedClosingTag",
+            Self::UnclosedSection => "UnclosedSection",
+            Self::UnmatchedClosingTag => "UnmatchedClosingTag",
+            Self::UnresolvedPartial => "UnresolvedPartial",
+            Self::MissingSchemaPath => "MissingSchemaPath",
+            Self::FrontmatterParseError => "FrontmatterParseError",
+            Self::MalformedInheritance => "MalformedInheritance",
+            Self::MalformedDynamicName => "MalformedDynamicName",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub severity: DiagnosticSeverity,
