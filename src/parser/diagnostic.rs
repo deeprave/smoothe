@@ -15,6 +15,8 @@ pub enum IssueKind {
     UnresolvedPartial,
     MissingSchemaPath,
     FrontmatterParseError,
+    MalformedInheritance,
+    MalformedDynamicName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

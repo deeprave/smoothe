@@ -8,7 +8,7 @@ use std::{
 
 use smoothe::parser::{
     Diagnostic, DiagnosticSeverity, FrontmatterFormat, FrontmatterOptions, IssueKind, LambdaSpec,
-    Node, ParseEvent, ParserInput, PartialMapping, SourceMetadata, parse,
+    Node, ParseEvent, ParserInput, PartialMapping, SourceMetadata, TemplateName, parse,
 };
 
 fn parse_template(source: &str) -> smoothe::parser::ParseResult {
@@ -245,6 +245,106 @@ fn recognizes_configured_lambda_references() {
 
     assert_eq!(result.state.lambda_references.len(), 1);
     assert_eq!(result.state.lambda_references[0].name, "resource");
+}
+
+#[test]
+fn upstream_lambda_fixture_cases_are_modeled_without_execution() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{lambda_value}} {{#lambda_section}}{{name}}{{/lambda_section}}",
+    );
+    input.lambdas.push(LambdaSpec::new("lambda_value"));
+    input.lambdas.push(LambdaSpec::new("lambda_section"));
+
+    let result = parse(input);
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(
+        result.ast.nodes,
+        vec![
+            Node::lambda_variable("lambda_value", 0..16),
+            Node::text(" ", 16..17),
+            Node::lambda_section(
+                "lambda_section",
+                17..63,
+                vec![Node::escaped_variable("name", 36..44)],
+            ),
+        ]
+    );
+    assert_eq!(result.state.lambda_references.len(), 2);
+}
+
+#[test]
+fn upstream_inheritance_fixture_cases_are_preserved() {
+    let result = parse_template("{{< layout}}{{$title}}Default{{/title}}{{/layout}}");
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(
+        result.ast.nodes,
+        vec![Node::parent(
+            TemplateName::Static("layout".to_owned()),
+            0..50,
+            vec![Node::block(
+                "title",
+                12..39,
+                vec![Node::text("Default", 22..29)]
+            )],
+        )]
+    );
+    assert_eq!(result.state.parent_references.len(), 1);
+    assert_eq!(
+        result.state.parent_references[0].name,
+        TemplateName::Static("layout".to_owned())
+    );
+    assert_eq!(result.state.block_definitions.len(), 1);
+    assert_eq!(result.state.block_definitions[0].name, "title");
+}
+
+#[test]
+fn upstream_dynamic_name_fixture_cases_are_preserved() {
+    let result = parse_template("{{>* partial_name}} {{<* parent_name}}{{/parent_name}}");
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(
+        result.ast.nodes,
+        vec![
+            Node::dynamic_partial("partial_name", 0..19),
+            Node::text(" ", 19..20),
+            Node::parent(
+                TemplateName::Dynamic("parent_name".to_owned()),
+                20..54,
+                vec![]
+            ),
+        ]
+    );
+    assert_eq!(result.state.dynamic_names.len(), 2);
+    assert_eq!(
+        result.state.dynamic_names[0].name,
+        TemplateName::Dynamic("partial_name".to_owned())
+    );
+    assert_eq!(
+        result.state.dynamic_names[1].name,
+        TemplateName::Dynamic("parent_name".to_owned())
+    );
+}
+
+#[test]
+fn documents_unsupported_advanced_fixture_cases_as_diagnostics() {
+    let inheritance = parse_template("{{< }}");
+
+    assert_eq!(inheritance.state.diagnostics.len(), 1);
+    assert_eq!(
+        inheritance.state.diagnostics[0].issue,
+        IssueKind::MalformedInheritance
+    );
+
+    let dynamic_name = parse_template("{{>* }}");
+
+    assert_eq!(dynamic_name.state.diagnostics.len(), 1);
+    assert_eq!(
+        dynamic_name.state.diagnostics[0].issue,
+        IssueKind::MalformedDynamicName
+    );
 }
 
 #[test]

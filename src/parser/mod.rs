@@ -5,7 +5,7 @@ mod source;
 
 use std::{collections::HashSet, fs, ops::Range, path::PathBuf};
 
-pub use ast::{Ast, Delimiters, Node};
+pub use ast::{Ast, Delimiters, Node, TemplateName};
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, IssueKind, ParseEvent};
 pub use input::{
     FeedbackHandlers, FrontmatterOptions, LambdaSpec, ParserInput, PartialMapping, SourceMetadata,
@@ -30,6 +30,9 @@ pub struct ParserState {
     pub partials: Vec<ParsedPartial>,
     pub nested_partials: Vec<PartialReference>,
     pub lambda_references: Vec<LambdaReference>,
+    pub parent_references: Vec<ParentReference>,
+    pub block_definitions: Vec<BlockDefinition>,
+    pub dynamic_names: Vec<DynamicName>,
     pub frontmatter: FrontmatterState,
 }
 
@@ -50,6 +53,27 @@ pub struct PartialReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LambdaReference {
     pub name: String,
+    pub source_name: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentReference {
+    pub name: TemplateName,
+    pub source_name: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockDefinition {
+    pub name: String,
+    pub source_name: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DynamicName {
+    pub name: TemplateName,
     pub source_name: String,
     pub span: SourceSpan,
 }
@@ -103,6 +127,9 @@ impl<'a> Parser<'a> {
                 partials: Vec::new(),
                 nested_partials: Vec::new(),
                 lambda_references: Vec::new(),
+                parent_references: Vec::new(),
+                block_definitions: Vec::new(),
+                dynamic_names: Vec::new(),
                 frontmatter: FrontmatterState {
                     format: None,
                     context: serde_json::Value::Object(serde_json::Map::new()),
@@ -115,6 +142,7 @@ impl<'a> Parser<'a> {
         let content_start = self.parse_frontmatter();
         let nodes = self.parse_nodes(None, content_start).nodes;
         self.classify_lambdas(&nodes);
+        self.index_advanced_nodes(&nodes);
         self.check_schema_references(&nodes);
         if self.expand_partials {
             self.expand_partial_references(&nodes);
@@ -130,7 +158,7 @@ impl<'a> Parser<'a> {
 
     fn parse_nodes(
         &mut self,
-        expected_closing: Option<OpenSection>,
+        expected_closing: Option<OpenContainer>,
         start_cursor: usize,
     ) -> ParseNodesResult {
         let mut nodes = Vec::new();
@@ -163,36 +191,103 @@ impl<'a> Parser<'a> {
 
             match tag.kind {
                 TagKind::EscapedVariable(name) => {
-                    nodes.push(Node::escaped_variable(name, tag.span))
+                    if self.is_lambda(&name) {
+                        nodes.push(Node::lambda_variable(name, tag.span));
+                    } else {
+                        nodes.push(Node::escaped_variable(name, tag.span));
+                    }
                 }
                 TagKind::UnescapedVariable(name) => {
                     nodes.push(Node::unescaped_variable(name, tag.span));
                 }
                 TagKind::Comment(text) => nodes.push(Node::comment(text, tag.span)),
                 TagKind::Partial(name) => nodes.push(Node::partial(name, tag.span)),
+                TagKind::DynamicPartial(expression) => {
+                    nodes.push(Node::dynamic_partial(expression, tag.span));
+                }
                 TagKind::DelimiterChange(open, close) => {
                     self.state.delimiters = Delimiters::new(open.clone(), close.clone());
                     nodes.push(Node::delimiter_change(open, close, tag.span));
                 }
                 TagKind::Section { name, inverted } => {
-                    let section = OpenSection {
+                    let kind = if inverted {
+                        ContainerKind::InvertedSection
+                    } else if self.is_lambda(&name) {
+                        ContainerKind::LambdaSection
+                    } else {
+                        ContainerKind::Section
+                    };
+                    let container = OpenContainer {
                         name,
                         span_start: tag.span.start,
                         content_start: tag.span.end,
-                        inverted,
+                        kind,
                     };
-                    let parsed = self.parse_nodes(Some(section.clone()), section.content_start);
+                    let parsed = self.parse_nodes(Some(container.clone()), container.content_start);
                     cursor = parsed.cursor;
-                    let span = section.span_start..cursor;
-                    if section.inverted {
-                        nodes.push(Node::inverted_section(section.name, span, parsed.nodes));
-                    } else {
-                        nodes.push(Node::section(section.name, span, parsed.nodes));
+                    let span = container.span_start..cursor;
+                    match container.kind {
+                        ContainerKind::Section => {
+                            nodes.push(Node::section(container.name, span, parsed.nodes));
+                        }
+                        ContainerKind::InvertedSection => {
+                            nodes.push(Node::inverted_section(container.name, span, parsed.nodes));
+                        }
+                        ContainerKind::LambdaSection => {
+                            nodes.push(Node::lambda_section(container.name, span, parsed.nodes));
+                        }
+                        ContainerKind::Parent | ContainerKind::Block => unreachable!(),
                     }
                 }
+                TagKind::Parent(name) => {
+                    let container = OpenContainer {
+                        name: name.value().to_owned(),
+                        span_start: tag.span.start,
+                        content_start: tag.span.end,
+                        kind: ContainerKind::Parent,
+                    };
+                    let parsed = self.parse_nodes(Some(container.clone()), container.content_start);
+                    cursor = parsed.cursor;
+                    nodes.push(Node::parent(
+                        name,
+                        container.span_start..cursor,
+                        parsed.nodes,
+                    ));
+                }
+                TagKind::Block(name) => {
+                    let container = OpenContainer {
+                        name,
+                        span_start: tag.span.start,
+                        content_start: tag.span.end,
+                        kind: ContainerKind::Block,
+                    };
+                    let parsed = self.parse_nodes(Some(container.clone()), container.content_start);
+                    cursor = parsed.cursor;
+                    nodes.push(Node::block(
+                        container.name,
+                        container.span_start..cursor,
+                        parsed.nodes,
+                    ));
+                }
+                TagKind::MalformedInheritance => {
+                    self.emit(
+                        DiagnosticSeverity::Error,
+                        IssueKind::MalformedInheritance,
+                        tag.span,
+                        "malformed inheritance tag",
+                    );
+                }
+                TagKind::MalformedDynamicName => {
+                    self.emit(
+                        DiagnosticSeverity::Error,
+                        IssueKind::MalformedDynamicName,
+                        tag.span,
+                        "malformed dynamic name",
+                    );
+                }
                 TagKind::Closing(name) => {
-                    if let Some(section) = expected_closing {
-                        if section.name == name {
+                    if let Some(container) = expected_closing {
+                        if container.name == name {
                             return ParseNodesResult {
                                 nodes,
                                 cursor: tag.span.end,
@@ -204,8 +299,8 @@ impl<'a> Parser<'a> {
                             IssueKind::MismatchedClosingTag,
                             tag.span.clone(),
                             format!(
-                                "closing tag `{name}` does not match open section `{}`",
-                                section.name
+                                "closing tag `{name}` does not match open tag `{}`",
+                                container.name
                             ),
                         );
                         return ParseNodesResult {
@@ -224,12 +319,12 @@ impl<'a> Parser<'a> {
             }
         }
 
-        if let Some(section) = expected_closing {
+        if let Some(container) = expected_closing {
             self.emit(
                 DiagnosticSeverity::Error,
                 IssueKind::UnclosedSection,
-                section.span_start..section.content_start,
-                format!("section `{}` is not closed", section.name),
+                container.span_start..container.content_start,
+                format!("tag `{}` is not closed", container.name),
             );
             ParseNodesResult {
                 nodes,
@@ -276,7 +371,15 @@ impl<'a> Parser<'a> {
             },
             b'/' => TagKind::Closing(raw[1..].trim().to_owned()),
             b'!' => TagKind::Comment(raw[1..].trim().to_owned()),
-            b'>' => TagKind::Partial(raw[1..].trim().to_owned()),
+            b'>' => self.parse_partial_tag(raw)?,
+            b'<' => self.parse_parent_tag(raw)?,
+            b'$' => {
+                let name = raw[1..].trim();
+                if name.is_empty() {
+                    return None;
+                }
+                TagKind::Block(name.to_owned())
+            }
             b'&' => TagKind::UnescapedVariable(raw[1..].trim().to_owned()),
             b'=' if raw.ends_with('=') => {
                 let body = raw[1..raw.len() - 1].trim();
@@ -292,6 +395,35 @@ impl<'a> Parser<'a> {
         };
 
         Some(Tag { kind, span })
+    }
+
+    fn parse_partial_tag(&self, raw: &str) -> Option<TagKind> {
+        let name = raw[1..].trim();
+        if let Some(expression) = dynamic_expression(name) {
+            if expression.is_empty() {
+                return Some(TagKind::MalformedDynamicName);
+            }
+            return Some(TagKind::DynamicPartial(expression.to_owned()));
+        }
+        Some(TagKind::Partial(name.to_owned()))
+    }
+
+    fn parse_parent_tag(&self, raw: &str) -> Option<TagKind> {
+        let name = raw[1..].trim();
+        if name.is_empty() {
+            return Some(TagKind::MalformedInheritance);
+        }
+
+        if let Some(expression) = dynamic_expression(name) {
+            if expression.is_empty() {
+                return Some(TagKind::MalformedDynamicName);
+            }
+            return Some(TagKind::Parent(TemplateName::Dynamic(
+                expression.to_owned(),
+            )));
+        }
+
+        Some(TagKind::Parent(TemplateName::Static(name.to_owned())))
     }
 
     fn parse_frontmatter(&mut self) -> usize {
@@ -427,6 +559,63 @@ impl<'a> Parser<'a> {
             );
     }
 
+    fn index_advanced_nodes(&mut self, nodes: &[Node]) {
+        for node in nodes {
+            match node {
+                Node::Parent {
+                    name,
+                    span,
+                    children,
+                } => {
+                    self.state.parent_references.push(ParentReference {
+                        name: name.clone(),
+                        source_name: self.source_name.clone(),
+                        span: SourceSpan::new(span.start, span.end),
+                    });
+                    if matches!(name, TemplateName::Dynamic(_)) {
+                        self.state.dynamic_names.push(DynamicName {
+                            name: name.clone(),
+                            source_name: self.source_name.clone(),
+                            span: SourceSpan::new(span.start, span.end),
+                        });
+                    }
+                    self.index_advanced_nodes(children);
+                }
+                Node::Block {
+                    name,
+                    span,
+                    children,
+                } => {
+                    self.state.block_definitions.push(BlockDefinition {
+                        name: name.clone(),
+                        source_name: self.source_name.clone(),
+                        span: SourceSpan::new(span.start, span.end),
+                    });
+                    self.index_advanced_nodes(children);
+                }
+                Node::DynamicPartial { expression, span } => {
+                    self.state.dynamic_names.push(DynamicName {
+                        name: TemplateName::Dynamic(expression.clone()),
+                        source_name: self.source_name.clone(),
+                        span: SourceSpan::new(span.start, span.end),
+                    });
+                }
+                Node::Section { children, .. }
+                | Node::InvertedSection { children, .. }
+                | Node::LambdaSection { children, .. } => {
+                    self.index_advanced_nodes(children);
+                }
+                Node::Text { .. }
+                | Node::EscapedVariable { .. }
+                | Node::LambdaVariable { .. }
+                | Node::UnescapedVariable { .. }
+                | Node::Comment { .. }
+                | Node::Partial { .. }
+                | Node::DelimiterChange { .. } => {}
+            }
+        }
+    }
+
     fn check_schema_references(&mut self, nodes: &[Node]) {
         let Some(schema) = self.context_schema.clone() else {
             return;
@@ -461,6 +650,10 @@ impl<'a> Parser<'a> {
         self.source_root
             .as_ref()
             .map_or_else(|| path.clone(), |root| root.join(path))
+    }
+
+    fn is_lambda(&self, name: &str) -> bool {
+        self.lambdas.iter().any(|lambda| lambda.name == name)
     }
 
     fn push_text(&self, nodes: &mut Vec<Node>, start: usize, end: usize) {
@@ -523,11 +716,20 @@ impl<'a> Parser<'a> {
 }
 
 #[derive(Debug, Clone)]
-struct OpenSection {
+struct OpenContainer {
     name: String,
     span_start: usize,
     content_start: usize,
-    inverted: bool,
+    kind: ContainerKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ContainerKind {
+    Section,
+    InvertedSection,
+    LambdaSection,
+    Parent,
+    Block,
 }
 
 struct ParseNodesResult {
@@ -545,9 +747,14 @@ enum TagKind {
     UnescapedVariable(String),
     Comment(String),
     Partial(String),
+    DynamicPartial(String),
+    Parent(TemplateName),
+    Block(String),
     DelimiterChange(String, String),
     Section { name: String, inverted: bool },
     Closing(String),
+    MalformedInheritance,
+    MalformedDynamicName,
 }
 
 #[derive(Clone)]
@@ -569,13 +776,19 @@ fn collect_partial_nodes_into(nodes: &[Node], partials: &mut Vec<NamedSpan>) {
                 name: name.clone(),
                 span: span.clone(),
             }),
-            Node::Section { children, .. } | Node::InvertedSection { children, .. } => {
+            Node::Section { children, .. }
+            | Node::InvertedSection { children, .. }
+            | Node::LambdaSection { children, .. }
+            | Node::Parent { children, .. }
+            | Node::Block { children, .. } => {
                 collect_partial_nodes_into(children, partials);
             }
             Node::Text { .. }
             | Node::EscapedVariable { .. }
+            | Node::LambdaVariable { .. }
             | Node::UnescapedVariable { .. }
             | Node::Comment { .. }
+            | Node::DynamicPartial { .. }
             | Node::DelimiterChange { .. } => {}
         }
     }
@@ -590,18 +803,23 @@ fn collect_reference_nodes(nodes: &[Node]) -> Vec<NamedSpan> {
 fn collect_reference_nodes_into(nodes: &[Node], references: &mut Vec<NamedSpan>) {
     for node in nodes {
         match node {
-            Node::EscapedVariable { name, span } | Node::UnescapedVariable { name, span } => {
-                references.push(NamedSpan {
-                    name: name.clone(),
-                    span: span.clone(),
-                });
-            }
+            Node::EscapedVariable { name, span }
+            | Node::LambdaVariable { name, span }
+            | Node::UnescapedVariable { name, span } => references.push(NamedSpan {
+                name: name.clone(),
+                span: span.clone(),
+            }),
             Node::Section {
                 name,
                 span,
                 children,
             }
             | Node::InvertedSection {
+                name,
+                span,
+                children,
+            }
+            | Node::LambdaSection {
                 name,
                 span,
                 children,
@@ -612,12 +830,20 @@ fn collect_reference_nodes_into(nodes: &[Node], references: &mut Vec<NamedSpan>)
                 });
                 collect_reference_nodes_into(children, references);
             }
+            Node::Parent { children, .. } | Node::Block { children, .. } => {
+                collect_reference_nodes_into(children, references);
+            }
             Node::Text { .. }
             | Node::Comment { .. }
             | Node::Partial { .. }
+            | Node::DynamicPartial { .. }
             | Node::DelimiterChange { .. } => {}
         }
     }
+}
+
+fn dynamic_expression(name: &str) -> Option<&str> {
+    name.strip_prefix('*').map(str::trim)
 }
 
 fn parse_frontmatter_value(body: &str) -> Result<(FrontmatterFormat, serde_json::Value), String> {

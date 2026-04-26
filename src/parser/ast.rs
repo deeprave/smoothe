@@ -15,6 +15,10 @@ pub enum Node {
         name: String,
         span: Range<usize>,
     },
+    LambdaVariable {
+        name: String,
+        span: Range<usize>,
+    },
     UnescapedVariable {
         name: String,
         span: Range<usize>,
@@ -28,6 +32,11 @@ pub enum Node {
         span: Range<usize>,
         children: Vec<Node>,
     },
+    LambdaSection {
+        name: String,
+        span: Range<usize>,
+        children: Vec<Node>,
+    },
     InvertedSection {
         name: String,
         span: Range<usize>,
@@ -36,6 +45,20 @@ pub enum Node {
     Partial {
         name: String,
         span: Range<usize>,
+    },
+    DynamicPartial {
+        expression: String,
+        span: Range<usize>,
+    },
+    Parent {
+        name: TemplateName,
+        span: Range<usize>,
+        children: Vec<Node>,
+    },
+    Block {
+        name: String,
+        span: Range<usize>,
+        children: Vec<Node>,
     },
     DelimiterChange {
         open: String,
@@ -54,6 +77,13 @@ impl Node {
 
     pub fn escaped_variable(name: impl Into<String>, span: Range<usize>) -> Self {
         Self::EscapedVariable {
+            name: name.into(),
+            span,
+        }
+    }
+
+    pub fn lambda_variable(name: impl Into<String>, span: Range<usize>) -> Self {
+        Self::LambdaVariable {
             name: name.into(),
             span,
         }
@@ -81,6 +111,18 @@ impl Node {
         }
     }
 
+    pub fn lambda_section(
+        name: impl Into<String>,
+        span: Range<usize>,
+        children: Vec<Node>,
+    ) -> Self {
+        Self::LambdaSection {
+            name: name.into(),
+            span,
+            children,
+        }
+    }
+
     pub fn inverted_section(
         name: impl Into<String>,
         span: Range<usize>,
@@ -97,6 +139,29 @@ impl Node {
         Self::Partial {
             name: name.into(),
             span,
+        }
+    }
+
+    pub fn dynamic_partial(expression: impl Into<String>, span: Range<usize>) -> Self {
+        Self::DynamicPartial {
+            expression: expression.into(),
+            span,
+        }
+    }
+
+    pub fn parent(name: TemplateName, span: Range<usize>, children: Vec<Node>) -> Self {
+        Self::Parent {
+            name,
+            span,
+            children,
+        }
+    }
+
+    pub fn block(name: impl Into<String>, span: Range<usize>, children: Vec<Node>) -> Self {
+        Self::Block {
+            name: name.into(),
+            span,
+            children,
         }
     }
 
@@ -135,5 +200,19 @@ impl Delimiters {
 impl Default for Delimiters {
     fn default() -> Self {
         Self::new("{{", "}}")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateName {
+    Static(String),
+    Dynamic(String),
+}
+
+impl TemplateName {
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Static(value) | Self::Dynamic(value) => value,
+        }
     }
 }
