@@ -22,6 +22,7 @@ pub fn dispatch(command: Commands, options: ResolvedOptions) -> ExitCode {
 struct TemplateInput {
     name: String,
     source: String,
+    root: Option<std::path::PathBuf>,
 }
 
 fn read_template_inputs(inputs: &[String]) -> Result<Vec<TemplateInput>, InputReadError> {
@@ -41,14 +42,17 @@ fn read_template_input(input: &str) -> Result<TemplateInput, InputReadError> {
         return Ok(TemplateInput {
             name: "<stdin>".to_owned(),
             source,
+            root: None,
         });
     }
 
     let source = fs::read_to_string(input).map_err(|error| InputReadError::new(input, error))?;
+    let path = Path::new(input);
 
     Ok(TemplateInput {
         name: display_name(input),
         source,
+        root: path.parent().map(std::path::Path::to_owned),
     })
 }
 

@@ -15,6 +15,7 @@ pub enum IssueKind {
     UnresolvedPartial,
     MissingSchemaPath,
     FrontmatterParseError,
+    UnsupportedIncludes,
     MalformedInheritance,
     MalformedDynamicName,
 }
@@ -29,6 +30,7 @@ impl IssueKind {
             Self::UnresolvedPartial => "UnresolvedPartial",
             Self::MissingSchemaPath => "MissingSchemaPath",
             Self::FrontmatterParseError => "FrontmatterParseError",
+            Self::UnsupportedIncludes => "UnsupportedIncludes",
             Self::MalformedInheritance => "MalformedInheritance",
             Self::MalformedDynamicName => "MalformedDynamicName",
         }

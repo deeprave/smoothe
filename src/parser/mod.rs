@@ -7,9 +7,7 @@ use std::{collections::HashSet, fs, ops::Range, path::PathBuf};
 
 pub use ast::{Ast, Delimiters, Node, TemplateName};
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, IssueKind, ParseEvent};
-pub use input::{
-    FeedbackHandlers, FrontmatterOptions, LambdaSpec, ParserInput, PartialMapping, SourceMetadata,
-};
+pub use input::{FeedbackHandlers, LambdaSpec, ParserInput, PartialMapping, SourceMetadata};
 pub use source::{SourceLocation, SourceSpan};
 
 pub fn parse(input: ParserInput<'_>) -> ParseResult {
@@ -33,7 +31,6 @@ pub struct ParserState {
     pub parent_references: Vec<ParentReference>,
     pub block_definitions: Vec<BlockDefinition>,
     pub dynamic_names: Vec<DynamicName>,
-    pub frontmatter: FrontmatterState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,28 +75,16 @@ pub struct DynamicName {
     pub span: SourceSpan,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrontmatterFormat {
-    Yaml,
-    Json,
-    Toml,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrontmatterState {
-    pub format: Option<FrontmatterFormat>,
-    pub context: serde_json::Value,
-}
-
 struct Parser<'a> {
     source_name: String,
     source_root: Option<PathBuf>,
+    body_offset: usize,
+    body_start_line: usize,
     source: &'a str,
     feedback: FeedbackHandlers<'a>,
     partials: Vec<PartialMapping>,
     lambdas: Vec<LambdaSpec>,
     context_schema: Option<serde_json::Value>,
-    frontmatter: FrontmatterOptions,
     expand_partials: bool,
     state: ParserState,
 }
@@ -113,12 +98,13 @@ impl<'a> Parser<'a> {
         Self {
             source_name: input.source.name.clone(),
             source_root: input.source.root,
+            body_offset: input.source.body_offset,
+            body_start_line: input.source.body_start_line,
             source: input.source_text,
             feedback: input.feedback,
             partials: input.partials,
             lambdas: input.lambdas,
             context_schema: input.context_schema,
-            frontmatter: input.frontmatter,
             expand_partials,
             state: ParserState {
                 diagnostics: Vec::new(),
@@ -130,17 +116,12 @@ impl<'a> Parser<'a> {
                 parent_references: Vec::new(),
                 block_definitions: Vec::new(),
                 dynamic_names: Vec::new(),
-                frontmatter: FrontmatterState {
-                    format: None,
-                    context: serde_json::Value::Object(serde_json::Map::new()),
-                },
             },
         }
     }
 
     fn parse(mut self) -> ParseResult {
-        let content_start = self.parse_frontmatter();
-        let nodes = self.parse_nodes(None, content_start).nodes;
+        let nodes = self.parse_nodes(None, self.body_offset).nodes;
         self.classify_lambdas(&nodes);
         self.index_advanced_nodes(&nodes);
         self.check_schema_references(&nodes);
@@ -426,42 +407,6 @@ impl<'a> Parser<'a> {
         Some(TagKind::Parent(TemplateName::Static(name.to_owned())))
     }
 
-    fn parse_frontmatter(&mut self) -> usize {
-        if !self.frontmatter.enabled || !self.source.starts_with("---\n") {
-            return 0;
-        }
-
-        let body_start = 4;
-        let Some(relative_end) = self.source[body_start..].find("\n---\n") else {
-            return 0;
-        };
-        let body_end = body_start + relative_end;
-        let content_start = body_end + "\n---\n".len();
-        let body = &self.source[body_start..body_end];
-        if body.trim().is_empty() {
-            return content_start;
-        }
-
-        match parse_frontmatter_value(body) {
-            Ok((format, context)) => {
-                self.state.frontmatter = FrontmatterState {
-                    format: Some(format),
-                    context,
-                };
-            }
-            Err(message) => {
-                self.emit(
-                    DiagnosticSeverity::Warning,
-                    IssueKind::FrontmatterParseError,
-                    0..content_start,
-                    message,
-                );
-            }
-        }
-
-        content_start
-    }
-
     fn expand_partial_references(&mut self, nodes: &[Node]) {
         if self.partials.is_empty() {
             return;
@@ -491,7 +436,6 @@ impl<'a> Parser<'a> {
                     input.partials = self.partials.clone();
                     input.lambdas = self.lambdas.clone();
                     input.context_schema = self.context_schema.clone();
-                    input.frontmatter = self.frontmatter;
                     let parsed = Parser::new_with_partial_expansion(input, false).parse();
                     self.state.diagnostics.extend(parsed.state.diagnostics);
                     self.state
@@ -680,7 +624,7 @@ impl<'a> Parser<'a> {
             severity,
             issue,
             source_name: self.source_name.clone(),
-            location: SourceLocation::for_offset(self.source, span.start),
+            location: self.location_for_offset(span.start),
             span: SourceSpan::new(span.start, span.end),
             message: message.into(),
         };
@@ -712,6 +656,17 @@ impl<'a> Parser<'a> {
         }
 
         self.state.diagnostics.push(diagnostic);
+    }
+
+    fn location_for_offset(&self, offset: usize) -> SourceLocation {
+        if offset < self.body_offset {
+            return SourceLocation::for_offset(self.source, offset);
+        }
+
+        let relative = offset - self.body_offset;
+        let mut location = SourceLocation::for_offset(&self.source[self.body_offset..], relative);
+        location.line += self.body_start_line.saturating_sub(1);
+        location
     }
 }
 
@@ -844,38 +799,6 @@ fn collect_reference_nodes_into(nodes: &[Node], references: &mut Vec<NamedSpan>)
 
 fn dynamic_expression(name: &str) -> Option<&str> {
     name.strip_prefix('*').map(str::trim)
-}
-
-fn parse_frontmatter_value(body: &str) -> Result<(FrontmatterFormat, serde_json::Value), String> {
-    let trimmed = body.trim_start();
-    if trimmed.starts_with('{') {
-        return serde_json::from_str(body)
-            .map(|value| (FrontmatterFormat::Json, value))
-            .map_err(|error| format!("failed to parse JSON frontmatter: {error}"));
-    }
-
-    if looks_like_toml(body) {
-        let value: toml::Value = toml::from_str(body)
-            .map_err(|error| format!("failed to parse TOML frontmatter: {error}"))?;
-        return serde_json::to_value(value)
-            .map(|value| (FrontmatterFormat::Toml, value))
-            .map_err(|error| format!("failed to convert TOML frontmatter: {error}"));
-    }
-
-    let value: serde_yaml::Value = serde_yaml::from_str(body)
-        .map_err(|error| format!("failed to parse YAML frontmatter: {error}"))?;
-    serde_json::to_value(value)
-        .map(|value| (FrontmatterFormat::Yaml, value))
-        .map_err(|error| format!("failed to convert YAML frontmatter: {error}"))
-}
-
-fn looks_like_toml(body: &str) -> bool {
-    body.lines().any(|line| {
-        let trimmed = line.trim();
-        !trimmed.is_empty()
-            && !trimmed.starts_with('#')
-            && (trimmed.starts_with('[') || trimmed.contains('='))
-    })
 }
 
 fn schema_defines_path(schema: &serde_json::Value, path: &str) -> bool {

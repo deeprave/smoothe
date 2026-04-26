@@ -7,8 +7,8 @@ use std::{
 };
 
 use smoothe::parser::{
-    Diagnostic, DiagnosticSeverity, FrontmatterFormat, FrontmatterOptions, IssueKind, LambdaSpec,
-    Node, ParseEvent, ParserInput, PartialMapping, SourceMetadata, TemplateName, parse,
+    Diagnostic, DiagnosticSeverity, IssueKind, LambdaSpec, Node, ParseEvent, ParserInput,
+    PartialMapping, SourceMetadata, TemplateName, parse,
 };
 
 fn parse_template(source: &str) -> smoothe::parser::ParseResult {
@@ -119,6 +119,22 @@ fn reports_unclosed_and_mismatched_sections_with_locations() {
         mismatched.state.diagnostics[0].issue,
         IssueKind::MismatchedClosingTag
     );
+}
+
+#[test]
+fn reports_locations_relative_to_body_start_line() {
+    let result = parse(ParserInput::new(
+        SourceMetadata::new("template.mustache").with_body_start(0, 4),
+        "{{#items}}",
+    ));
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::UnclosedSection
+    );
+    assert_eq!(result.state.diagnostics[0].location.line, 4);
+    assert_eq!(result.state.diagnostics[0].location.column, 1);
 }
 
 #[test]
@@ -344,51 +360,6 @@ fn documents_unsupported_advanced_fixture_cases_as_diagnostics() {
     assert_eq!(
         dynamic_name.state.diagnostics[0].issue,
         IssueKind::MalformedDynamicName
-    );
-}
-
-#[test]
-fn parses_yaml_json_and_toml_frontmatter_context_extensions() {
-    let yaml = parse(ParserInput::new(
-        SourceMetadata::new("template.mustache"),
-        "---\ntitle: Hello\ncount: 2\n---\n{{title}}",
-    ));
-    assert_eq!(yaml.state.frontmatter.format, Some(FrontmatterFormat::Yaml));
-    assert_eq!(yaml.state.frontmatter.context["title"], "Hello");
-    assert_eq!(
-        yaml.ast.nodes,
-        vec![Node::escaped_variable("title", 30..39)]
-    );
-
-    let json = parse(ParserInput::new(
-        SourceMetadata::new("template.mustache"),
-        "---\n{\"title\":\"Hello\"}\n---\n{{title}}",
-    ));
-    assert_eq!(json.state.frontmatter.format, Some(FrontmatterFormat::Json));
-    assert_eq!(json.state.frontmatter.context["title"], "Hello");
-
-    let toml = parse(ParserInput::new(
-        SourceMetadata::new("template.mustache"),
-        "---\ntitle = \"Hello\"\n---\n{{title}}",
-    ));
-    assert_eq!(toml.state.frontmatter.format, Some(FrontmatterFormat::Toml));
-    assert_eq!(toml.state.frontmatter.context["title"], "Hello");
-}
-
-#[test]
-fn can_disable_frontmatter_parsing() {
-    let mut input = ParserInput::new(
-        SourceMetadata::new("template.mustache"),
-        "---\ntitle: Hello\n---\n{{title}}",
-    );
-    input.frontmatter = FrontmatterOptions::disabled();
-
-    let result = parse(input);
-
-    assert_eq!(result.state.frontmatter.format, None);
-    assert_eq!(
-        result.ast.nodes[0],
-        Node::text("---\ntitle: Hello\n---\n", 0..21)
     );
 }
 

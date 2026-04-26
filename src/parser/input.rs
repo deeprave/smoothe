@@ -7,7 +7,6 @@ pub struct ParserInput<'a> {
     pub partials: Vec<PartialMapping>,
     pub lambdas: Vec<LambdaSpec>,
     pub context_schema: Option<serde_json::Value>,
-    pub frontmatter: FrontmatterOptions,
 }
 
 impl<'a> ParserInput<'a> {
@@ -19,7 +18,6 @@ impl<'a> ParserInput<'a> {
             partials: Vec::new(),
             lambdas: Vec::new(),
             context_schema: None,
-            frontmatter: FrontmatterOptions::default(),
         }
     }
 }
@@ -28,6 +26,8 @@ impl<'a> ParserInput<'a> {
 pub struct SourceMetadata {
     pub name: String,
     pub root: Option<PathBuf>,
+    pub body_offset: usize,
+    pub body_start_line: usize,
 }
 
 impl SourceMetadata {
@@ -35,11 +35,19 @@ impl SourceMetadata {
         Self {
             name: name.into(),
             root: None,
+            body_offset: 0,
+            body_start_line: 1,
         }
     }
 
     pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.root = Some(root.into());
+        self
+    }
+
+    pub fn with_body_start(mut self, offset: usize, line: usize) -> Self {
+        self.body_offset = offset;
+        self.body_start_line = line;
         self
     }
 }
@@ -67,23 +75,6 @@ pub struct LambdaSpec {
 impl LambdaSpec {
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrontmatterOptions {
-    pub enabled: bool,
-}
-
-impl FrontmatterOptions {
-    pub fn disabled() -> Self {
-        Self { enabled: false }
-    }
-}
-
-impl Default for FrontmatterOptions {
-    fn default() -> Self {
-        Self { enabled: true }
     }
 }
 

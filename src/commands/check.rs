@@ -1,9 +1,8 @@
 use std::process::ExitCode;
 
 use smoothe::config::{ResolvedCheckOptions, ResolvedGlobalOptions};
-use smoothe::parser::{
-    Diagnostic, DiagnosticSeverity, ParserInput, SourceMetadata, parse as parse_template,
-};
+use smoothe::content::{ContentInput, process as process_template};
+use smoothe::parser::{Diagnostic, DiagnosticSeverity, SourceMetadata};
 
 use crate::cli::CheckArgs;
 
@@ -27,10 +26,11 @@ pub fn check(
     let mut has_error = false;
 
     for input in inputs {
-        let result = parse_template(ParserInput::new(
-            SourceMetadata::new(&input.name),
-            &input.source,
-        ));
+        let mut source = SourceMetadata::new(&input.name);
+        if let Some(root) = input.root {
+            source = source.with_root(root);
+        }
+        let result = process_template(ContentInput::new(source, &input.source));
 
         for diagnostic in &result.state.diagnostics {
             eprintln!("{}", format_diagnostic(diagnostic));
