@@ -8,11 +8,13 @@ use std::{
     process::ExitCode,
 };
 
+use smoothe::config::ResolvedOptions;
+
 use crate::cli::Commands;
 
-pub fn dispatch(command: Commands) -> ExitCode {
+pub fn dispatch(command: Commands, options: ResolvedOptions) -> ExitCode {
     match command {
-        Commands::Check(args) => check::check(args),
+        Commands::Check(args) => check::check(args, options.global, options.check),
         Commands::Parse(args) => parse::parse(args),
     }
 }

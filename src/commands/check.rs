@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+use smoothe::config::{ResolvedCheckOptions, ResolvedGlobalOptions};
 use smoothe::parser::{
     Diagnostic, DiagnosticSeverity, ParserInput, SourceMetadata, parse as parse_template,
 };
@@ -8,7 +9,13 @@ use crate::cli::CheckArgs;
 
 use super::read_template_inputs;
 
-pub fn check(args: CheckArgs) -> ExitCode {
+pub fn check(
+    args: CheckArgs,
+    global_options: ResolvedGlobalOptions,
+    _check_options: ResolvedCheckOptions,
+) -> ExitCode {
+    let _color = global_options.color;
+
     let inputs = match read_template_inputs(&args.inputs) {
         Ok(inputs) => inputs,
         Err(error) => {

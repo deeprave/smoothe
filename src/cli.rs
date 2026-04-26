@@ -1,6 +1,7 @@
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode};
 
 use clap::{ColorChoice, Parser, Subcommand};
+use smoothe::config;
 
 use crate::commands;
 
@@ -18,6 +19,9 @@ pub struct Cli {
 
     #[arg(long = "no-color", conflicts_with = "color")]
     no_color: bool,
+
+    #[arg(long, short = 'C', value_name = "PATH")]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Commands,
@@ -47,28 +51,26 @@ pub struct ParseArgs {
 }
 
 impl Cli {
-    fn color_choice(&self) -> ColorChoice {
-        if self.no_color {
-            return ColorChoice::Never;
+    fn global_options(&self) -> config::CliGlobalOptions {
+        config::CliGlobalOptions {
+            color: self.color,
+            no_color: self.no_color,
         }
-
-        if let Some(color) = self.color {
-            return color;
-        }
-
-        if env::var_os("NOCOLOR").is_some() {
-            return ColorChoice::Never;
-        }
-
-        ColorChoice::Auto
     }
 }
 
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
-    let _color_choice = cli.color_choice();
+    let configuration = match config::load(cli.config.as_deref()) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let options = config::resolve(&configuration, &cli.global_options());
 
-    commands::dispatch(cli.command)
+    commands::dispatch(cli.command, options)
 }
 
 fn parse_color_choice(value: &str) -> Result<ColorChoice, String> {

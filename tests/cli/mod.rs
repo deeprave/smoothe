@@ -53,6 +53,16 @@ fn write_template(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
     path
 }
 
+fn smoothe_with_isolated_config(cwd: &std::path::Path, home: &std::path::Path) -> Command {
+    let mut command = smoothe();
+    command
+        .current_dir(cwd)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", home)
+        .env_remove("NOCOLOR");
+    command
+}
+
 #[test]
 fn long_help_exits_successfully() {
     let output = smoothe().arg("--help").output().expect("run smoothe");
@@ -350,4 +360,210 @@ fn nocolor_environment_dispatches_check() {
 
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn startup_succeeds_without_discovered_config() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    let output = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn current_directory_config_is_loaded() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    fs::write(dir.join("smoothe.toml"), "not toml =").expect("write config");
+    let output = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("failed to parse configuration"));
+}
+
+#[test]
+fn xdg_config_home_config_is_loaded_after_current_directory_miss() {
+    let dir = temp_dir();
+    let xdg = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    fs::write(xdg.join("smoothe.toml"), "not toml =").expect("write config");
+    let output = smoothe()
+        .current_dir(&dir)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env_remove("NOCOLOR")
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("failed to parse configuration"));
+}
+
+#[test]
+fn default_home_config_is_loaded_when_xdg_config_home_is_unset() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let config_dir = home.join(".config");
+    fs::create_dir(&config_dir).expect("create config dir");
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    fs::write(config_dir.join("smoothe.toml"), "not toml =").expect("write config");
+    let output = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("failed to parse configuration"));
+}
+
+#[test]
+fn explicit_config_path_is_loaded() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    let config = dir.join("custom.toml");
+    fs::write(&config, "[options]\ncolor = \"auto\"\n[check]\n").expect("write config");
+    let output = smoothe_with_isolated_config(&dir, &home)
+        .arg("--config")
+        .arg(&config)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn short_explicit_config_path_is_loaded() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    let config = dir.join("custom.toml");
+    fs::write(&config, "[options]\ncolor = true\n").expect("write config");
+    let output = smoothe_with_isolated_config(&dir, &home)
+        .arg("-C")
+        .arg(&config)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn missing_explicit_config_path_fails_startup() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    let output = smoothe_with_isolated_config(&dir, &home)
+        .args(["--config", "missing.toml", "check"])
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("failed to read configuration missing.toml:"));
+}
+
+#[test]
+fn malformed_explicit_config_path_fails_startup() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    let config = dir.join("invalid.toml");
+    fs::write(&config, "not toml =").expect("write config");
+    let output = smoothe_with_isolated_config(&dir, &home)
+        .arg("--config")
+        .arg(&config)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("failed to parse configuration"));
+}
+
+#[test]
+fn config_color_values_parse_successfully() {
+    for color in ["true", "false", "\"always\"", "\"never\"", "\"auto\""] {
+        let dir = temp_dir();
+        let home = temp_dir();
+        let template = write_template(&dir, "valid.mustache", "{{name}}");
+        let config = dir.join("custom.toml");
+        fs::write(&config, format!("[options]\ncolor = {color}\n")).expect("write config");
+        let output = smoothe_with_isolated_config(&dir, &home)
+            .arg("--config")
+            .arg(&config)
+            .arg("check")
+            .arg(&template)
+            .output()
+            .expect("run smoothe");
+
+        assert!(output.status.success(), "color value {color} should parse");
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn current_directory_config_prevents_config_home_read() {
+    let dir = temp_dir();
+    let xdg = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    fs::write(dir.join("smoothe.toml"), "[options]\ncolor = \"auto\"\n").expect("write config");
+    fs::write(xdg.join("smoothe.toml"), "not toml =").expect("write config");
+    let output = smoothe()
+        .current_dir(&dir)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env_remove("NOCOLOR")
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn explicit_config_bypasses_discovered_config_paths() {
+    let dir = temp_dir();
+    let xdg = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "{{name}}");
+    let explicit = dir.join("custom.toml");
+    fs::write(dir.join("smoothe.toml"), "not toml =").expect("write config");
+    fs::write(xdg.join("smoothe.toml"), "not toml =").expect("write config");
+    fs::write(&explicit, "[options]\ncolor = \"auto\"\n").expect("write config");
+    let output = smoothe()
+        .current_dir(&dir)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .env_remove("NOCOLOR")
+        .arg("--config")
+        .arg(&explicit)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
 }
