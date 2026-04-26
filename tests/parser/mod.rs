@@ -1,7 +1,14 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    fs,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use smoothe::parser::{
-    Diagnostic, DiagnosticSeverity, IssueKind, Node, ParseEvent, ParserInput, SourceMetadata, parse,
+    Diagnostic, DiagnosticSeverity, FrontmatterFormat, FrontmatterOptions, IssueKind, LambdaSpec,
+    Node, ParseEvent, ParserInput, PartialMapping, SourceMetadata, parse,
 };
 
 fn parse_template(source: &str) -> smoothe::parser::ParseResult {
@@ -9,6 +16,24 @@ fn parse_template(source: &str) -> smoothe::parser::ParseResult {
         SourceMetadata::new("template.mustache"),
         source,
     ))
+}
+
+fn temp_template_root() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("smoothe-parser-test-{unique}"));
+    fs::create_dir_all(&root).expect("create template root");
+    root
+}
+
+fn write_file(root: &Path, relative: &str, source: &str) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create parent dir");
+    }
+    fs::write(path, source).expect("write template file");
 }
 
 #[test]
@@ -140,5 +165,164 @@ fn exposes_feedback_event_metadata() {
     assert_eq!(
         events.borrow()[0].diagnostic.issue,
         IssueKind::UnmatchedClosingTag
+    );
+}
+
+#[test]
+fn parses_one_level_of_configured_partials() {
+    let root = temp_template_root();
+    write_file(
+        &root,
+        "partials/header.mustache",
+        "Header {{title}} {{> nested}}",
+    );
+
+    let mut input = ParserInput::new(
+        SourceMetadata::new("pages/index.mustache").with_root(root.clone()),
+        "Start {{> header}}",
+    );
+    input.partials.push(PartialMapping::new(
+        "header",
+        PathBuf::from("partials/header.mustache"),
+    ));
+    input.partials.push(PartialMapping::new(
+        "nested",
+        PathBuf::from("partials/nested.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(result.state.partials.len(), 1);
+    assert_eq!(result.state.partials[0].name, "header");
+    assert_eq!(
+        result.state.partials[0].path,
+        root.join("partials/header.mustache")
+    );
+    assert_eq!(
+        result.state.partials[0].ast.nodes,
+        vec![
+            Node::text("Header ", 0..7),
+            Node::escaped_variable("title", 7..16),
+            Node::text(" ", 16..17),
+            Node::partial("nested", 17..29),
+        ]
+    );
+    assert_eq!(result.state.nested_partials.len(), 1);
+    assert_eq!(result.state.nested_partials[0].name, "nested");
+}
+
+#[test]
+fn reports_unresolved_partials() {
+    let mut input = ParserInput::new(SourceMetadata::new("template.mustache"), "{{> missing}}");
+    input.partials.push(PartialMapping::new(
+        "header",
+        PathBuf::from("partials/header.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].severity,
+        DiagnosticSeverity::Warning
+    );
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::UnresolvedPartial
+    );
+}
+
+#[test]
+fn recognizes_configured_lambda_references() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{#resource}}name{{/resource}} {{plain}}",
+    );
+    input.lambdas.push(LambdaSpec::new("resource"));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.lambda_references.len(), 1);
+    assert_eq!(result.state.lambda_references[0].name, "resource");
+}
+
+#[test]
+fn parses_yaml_json_and_toml_frontmatter_context_extensions() {
+    let yaml = parse(ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "---\ntitle: Hello\ncount: 2\n---\n{{title}}",
+    ));
+    assert_eq!(yaml.state.frontmatter.format, Some(FrontmatterFormat::Yaml));
+    assert_eq!(yaml.state.frontmatter.context["title"], "Hello");
+    assert_eq!(
+        yaml.ast.nodes,
+        vec![Node::escaped_variable("title", 30..39)]
+    );
+
+    let json = parse(ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "---\n{\"title\":\"Hello\"}\n---\n{{title}}",
+    ));
+    assert_eq!(json.state.frontmatter.format, Some(FrontmatterFormat::Json));
+    assert_eq!(json.state.frontmatter.context["title"], "Hello");
+
+    let toml = parse(ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "---\ntitle = \"Hello\"\n---\n{{title}}",
+    ));
+    assert_eq!(toml.state.frontmatter.format, Some(FrontmatterFormat::Toml));
+    assert_eq!(toml.state.frontmatter.context["title"], "Hello");
+}
+
+#[test]
+fn can_disable_frontmatter_parsing() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "---\ntitle: Hello\n---\n{{title}}",
+    );
+    input.frontmatter = FrontmatterOptions::disabled();
+
+    let result = parse(input);
+
+    assert_eq!(result.state.frontmatter.format, None);
+    assert_eq!(
+        result.ast.nodes[0],
+        Node::text("---\ntitle: Hello\n---\n", 0..21)
+    );
+}
+
+#[test]
+fn warns_for_referenced_paths_missing_from_context_schema() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{user.name}} {{user.email}}",
+    );
+    input.context_schema = Some(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "user": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        }
+    }));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].severity,
+        DiagnosticSeverity::Warning
+    );
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::MissingSchemaPath
+    );
+    assert_eq!(
+        result.state.diagnostics[0].message,
+        "missing schema path `user.email`"
     );
 }

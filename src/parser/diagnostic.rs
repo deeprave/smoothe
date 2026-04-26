@@ -12,6 +12,9 @@ pub enum IssueKind {
     MismatchedClosingTag,
     UnclosedSection,
     UnmatchedClosingTag,
+    UnresolvedPartial,
+    MissingSchemaPath,
+    FrontmatterParseError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
