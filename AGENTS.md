@@ -1,3 +1,11 @@
+## Openspec changes
+
+Creating openspec changes and artifacts, continuing, modifying, archiving are asynchronous tasks
+with respect to the development workflow and should not affect the current workflow phase or
+issue.
+
+The openspec tasks artifact however must be kept updated with respect to the implementation.
+
 ## Using mcp-guide (guide)
 
 JSON responses from the mcp often return instruction as "instruction"
