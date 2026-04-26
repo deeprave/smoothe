@@ -1,4 +1,4 @@
-use std::{env, process::ExitCode};
+use std::{env, path::PathBuf, process::ExitCode};
 
 use clap::{ColorChoice, Parser, Subcommand};
 
@@ -25,15 +25,26 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Check template syntax and correctness
     Check(CheckArgs),
+    /// Parse templates and print AST output
     Parse(ParseArgs),
 }
 
 #[derive(Debug, Parser)]
-pub struct CheckArgs {}
+pub struct CheckArgs {
+    #[arg(required = true)]
+    pub inputs: Vec<String>,
+}
 
 #[derive(Debug, Parser)]
-pub struct ParseArgs {}
+pub struct ParseArgs {
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
+
+    #[arg(required = true)]
+    pub inputs: Vec<String>,
+}
 
 impl Cli {
     fn color_choice(&self) -> ColorChoice {

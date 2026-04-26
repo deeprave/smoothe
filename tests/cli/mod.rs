@@ -1,6 +1,9 @@
 use std::{
+    fs,
     io::Write,
+    path::PathBuf,
     process::{Command, Output, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 fn smoothe() -> Command {
@@ -34,12 +37,30 @@ fn smoothe_with_stdin(args: &[&str], stdin: &str) -> Output {
     child.wait_with_output().expect("run smoothe")
 }
 
+fn temp_dir() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("smoothe-cli-test-{unique}"));
+    fs::create_dir(&dir).expect("create temp dir");
+    dir
+}
+
+fn write_template(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, content).expect("write template");
+    path
+}
+
 #[test]
 fn long_help_exits_successfully() {
     let output = smoothe().arg("--help").output().expect("run smoothe");
 
     assert!(output.status.success());
     assert!(stdout(&output).contains("Usage:"));
+    assert!(stdout(&output).contains("check  Check template syntax and correctness"));
+    assert!(stdout(&output).contains("parse  Parse templates and print AST output"));
 }
 
 #[test]
@@ -67,36 +88,75 @@ fn short_version_exits_successfully() {
 }
 
 #[test]
-fn check_command_exits_successfully() {
-    let output = smoothe().arg("check").output().expect("run smoothe");
+fn check_command_accepts_file_operands() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "valid.mustache",
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
 
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
-fn parse_command_reads_stdin_and_prints_ast() {
-    let output = smoothe_with_stdin(&["parse"], include_str!("../fixtures/parse-valid.mustache"));
+fn check_command_accepts_stdin_operand() {
+    let output = smoothe_with_stdin(
+        &["check", "-"],
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
 
     assert!(output.status.success());
-    assert!(stdout(&output).contains("EscapedVariable"));
-    assert!(stdout(&output).contains("name"));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn parse_command_accepts_file_operands_and_prints_compact_ast() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "valid.mustache",
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
+    let output = smoothe()
+        .arg("parse")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stdout = stdout(&output);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("input valid.mustache"));
+    assert!(stdout.contains("escaped_variable name=\"name\" span="));
+    assert!(!stdout.contains("EscapedVariable {"));
     assert!(stderr(&output).is_empty());
 }
 
 #[test]
-fn parse_command_accepts_empty_stdin() {
-    let output = smoothe_with_stdin(&["parse"], "");
+fn parse_command_accepts_stdin_operand() {
+    let output = smoothe_with_stdin(
+        &["parse", "-"],
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
 
     assert!(output.status.success());
-    assert!(stdout(&output).contains("Ast"));
+    assert!(stdout(&output).contains("input <stdin>"));
+    assert!(stdout(&output).contains("escaped_variable name=\"name\""));
     assert!(stderr(&output).is_empty());
 }
 
 #[test]
 fn parse_command_prints_error_diagnostics_and_exits_unsuccessfully() {
     let output = smoothe_with_stdin(
-        &["parse"],
+        &["parse", "-"],
         include_str!("../fixtures/parse-invalid.mustache"),
     );
     let stderr = stderr(&output);
@@ -105,13 +165,13 @@ fn parse_command_prints_error_diagnostics_and_exits_unsuccessfully() {
     assert!(stderr.contains("error"));
     assert!(stderr.contains("UnclosedSection"));
     assert!(stderr.contains("<stdin>:4:7"));
-    assert!(stdout(&output).contains("Ast"));
+    assert!(stdout(&output).contains("input <stdin>"));
 }
 
 #[test]
 fn parse_command_prints_warning_diagnostics_and_exits_successfully() {
     let output = smoothe_with_stdin(
-        &["parse"],
+        &["parse", "-"],
         include_str!("../fixtures/parse-warning.mustache"),
     );
     let stderr = stderr(&output);
@@ -120,7 +180,78 @@ fn parse_command_prints_warning_diagnostics_and_exits_successfully() {
     assert!(stderr.contains("warning"));
     assert!(stderr.contains("FrontmatterParseError"));
     assert!(stderr.contains("<stdin>:1:1"));
-    assert!(stdout(&output).contains("EscapedVariable"));
+    assert!(stdout(&output).contains("escaped_variable"));
+}
+
+#[test]
+fn parse_command_processes_multiple_operands_in_order() {
+    let dir = temp_dir();
+    let first = write_template(&dir, "first.mustache", "first {{name}}");
+    let second = write_template(&dir, "second.mustache", "second {{value}}");
+    let output = smoothe()
+        .arg("parse")
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .expect("run smoothe");
+    let stdout = stdout(&output);
+    let first_position = stdout.find("input first.mustache").expect("first input");
+    let second_position = stdout.find("input second.mustache").expect("second input");
+
+    assert!(output.status.success());
+    assert!(first_position < second_position);
+}
+
+#[test]
+fn check_command_reports_missing_file() {
+    let output = smoothe()
+        .args(["check", "missing.mustache"])
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("error: failed to read missing.mustache:"));
+}
+
+#[test]
+fn parse_command_reports_missing_file() {
+    let output = smoothe()
+        .args(["parse", "missing.mustache"])
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("error: failed to read missing.mustache:"));
+}
+
+#[test]
+fn parse_command_writes_output_file_and_suppresses_standard_output() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "warning.mustache",
+        include_str!("../fixtures/parse-warning.mustache"),
+    );
+    let output_path = dir.join("parse.txt");
+    let output = smoothe()
+        .arg("parse")
+        .arg("--out")
+        .arg(&output_path)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let parse_output = fs::read_to_string(&output_path).expect("read parse output");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(parse_output.contains("warning FrontmatterParseError"));
+    assert!(parse_output.contains("input warning.mustache"));
+    assert!(parse_output.contains("escaped_variable"));
 }
 
 #[test]
@@ -132,8 +263,15 @@ fn no_default_command_is_dispatched() {
 
 #[test]
 fn long_color_option_dispatches_check() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "valid.mustache",
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
     let output = smoothe()
         .args(["--color", "always", "check"])
+        .arg(&template)
         .output()
         .expect("run smoothe");
 
@@ -143,8 +281,15 @@ fn long_color_option_dispatches_check() {
 
 #[test]
 fn long_colour_alias_dispatches_check() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "valid.mustache",
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
     let output = smoothe()
         .args(["--colour", "always", "check"])
+        .arg(&template)
         .output()
         .expect("run smoothe");
 
@@ -154,8 +299,15 @@ fn long_colour_alias_dispatches_check() {
 
 #[test]
 fn short_color_alias_dispatches_check() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "valid.mustache",
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
     let output = smoothe()
         .args(["-c", "always", "check"])
+        .arg(&template)
         .output()
         .expect("run smoothe");
 
@@ -165,8 +317,15 @@ fn short_color_alias_dispatches_check() {
 
 #[test]
 fn no_color_flag_dispatches_check() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "valid.mustache",
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
     let output = smoothe()
         .args(["--no-color", "check"])
+        .arg(&template)
         .output()
         .expect("run smoothe");
 
@@ -176,9 +335,16 @@ fn no_color_flag_dispatches_check() {
 
 #[test]
 fn nocolor_environment_dispatches_check() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "valid.mustache",
+        include_str!("../fixtures/parse-valid.mustache"),
+    );
     let output = smoothe()
         .env("NOCOLOR", "1")
         .arg("check")
+        .arg(&template)
         .output()
         .expect("run smoothe");
 
