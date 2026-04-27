@@ -5,6 +5,13 @@ fn parse_config(source: &str) -> config::Configuration {
     toml::from_str(source).expect("parse config")
 }
 
+fn cli_options() -> config::CliGlobalOptions {
+    config::CliGlobalOptions {
+        color: None,
+        no_color: false,
+    }
+}
+
 #[test]
 fn color_options_resolve_by_precedence() {
     let cases = [
@@ -65,4 +72,52 @@ fn color_options_resolve_by_precedence() {
 
         assert_eq!(options.global.color, expected, "{name}");
     }
+}
+
+#[test]
+fn check_semantic_inputs_default_to_disabled() {
+    let config = parse_config("");
+    let options = config::resolve_with_environment(
+        &config,
+        &cli_options(),
+        config::EnvironmentOptions { nocolor: false },
+    );
+
+    assert_eq!(options.check.schema, config::SemanticInput::Disabled);
+    assert_eq!(options.check.lambdas, config::SemanticInput::Disabled);
+}
+
+#[test]
+fn check_semantic_inputs_accept_none_case_insensitively() {
+    let config = parse_config("[check]\nschema = \"NONE\"\nlambdas = \"None\"\n");
+    let options = config::resolve_with_environment(
+        &config,
+        &cli_options(),
+        config::EnvironmentOptions { nocolor: false },
+    );
+
+    assert_eq!(options.check.schema, config::SemanticInput::Disabled);
+    assert_eq!(options.check.lambdas, config::SemanticInput::Disabled);
+}
+
+#[test]
+fn check_semantic_input_paths_resolve_relative_to_config_file() {
+    let config = config::load(Some(std::path::Path::new(
+        "tests/fixtures/smoothe-check.toml",
+    )))
+    .expect("load config");
+    let options = config::resolve_with_environment(
+        &config,
+        &cli_options(),
+        config::EnvironmentOptions { nocolor: false },
+    );
+
+    assert_eq!(
+        options.check.schema,
+        config::SemanticInput::Path("tests/fixtures/schemas/context.json".into())
+    );
+    assert_eq!(
+        options.check.lambdas,
+        config::SemanticInput::Path("tests/fixtures/lambdas/known.json".into())
+    );
 }

@@ -14,6 +14,9 @@ They may also include "additional_agent_instructions"
  - these are *addtional* instructions you also MUST follow
 Do not confuse the two, you must follow both sets of instructions independently
 
+Resolve all `guide://` URIs through the guide MCP `read_resource` tool rather
+than the generic MCP resource reader.
+
 ## Project organization
 
 Keep test code in a separate `tests` hierarchy to clearly divide production code

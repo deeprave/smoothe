@@ -133,6 +133,320 @@ fn check_command_accepts_stdin_operand() {
 }
 
 #[test]
+fn check_command_accepts_semantic_input_options() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "Hello {{name}}");
+    let schema = write_template(&dir, "context.json", r#"{"type":"object"}"#);
+    let lambdas = write_template(&dir, "lambdas.json", r#"{"lambdas":{}}"#);
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn check_command_accepts_none_semantic_input_options() {
+    let output = smoothe_with_stdin(
+        &["check", "--schema", "none", "--lambdas", "NoNe", "-"],
+        "Hello {{name}}",
+    );
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_warns_for_unknown_schema_variable() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{user.email}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","properties":{"user":{"type":"object","properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("MissingSchemaPath"));
+    assert!(stderr.contains("user.email"));
+}
+
+#[test]
+fn check_command_warns_for_invalid_schema_input() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
+    let schema = write_template(&dir, "context.json", "{not json");
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("SchemaInputError"));
+}
+
+#[test]
+fn check_command_warns_for_unrecognisable_schema_input() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
+    let schema = write_template(&dir, "context.json", r#"{"title":"Context"}"#);
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("SchemaInputError"));
+    assert!(stderr.contains("unrecognisable"));
+}
+
+#[test]
+fn check_command_schema_none_disables_variable_warnings() {
+    let output = smoothe_with_stdin(
+        &["check", "--schema", "none", "-"],
+        "Hello {{missing.value}}",
+    );
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_resolves_configured_schema_relative_to_config_file() {
+    let workspace = temp_dir();
+    let config_dir = workspace.join("config");
+    let run_dir = workspace.join("run");
+    fs::create_dir(&config_dir).expect("create config dir");
+    fs::create_dir(&run_dir).expect("create run dir");
+    fs::write(
+        config_dir.join("smoothe.toml"),
+        "[check]\nschema = \"context.json\"\n",
+    )
+    .expect("write config");
+    fs::write(
+        config_dir.join("context.json"),
+        r#"{"type":"object","properties":{"name":{"type":"string"}}}"#,
+    )
+    .expect("write schema");
+    let template = write_template(&run_dir, "template.mustache", "Hello {{name}}");
+    let output = smoothe()
+        .current_dir(&run_dir)
+        .arg("--config")
+        .arg(config_dir.join("smoothe.toml"))
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_schema_none_overrides_configured_schema() {
+    let workspace = temp_dir();
+    let config_dir = workspace.join("config");
+    fs::create_dir(&config_dir).expect("create config dir");
+    fs::write(
+        config_dir.join("smoothe.toml"),
+        "[check]\nschema = \"context.json\"\n",
+    )
+    .expect("write config");
+    fs::write(
+        config_dir.join("context.json"),
+        r#"{"type":"object","properties":{}}"#,
+    )
+    .expect("write schema");
+    let output = smoothe_with_stdin(
+        &[
+            "--config",
+            config_dir
+                .join("smoothe.toml")
+                .to_str()
+                .expect("config path"),
+            "check",
+            "--schema",
+            "none",
+            "-",
+        ],
+        "Hello {{missing}}",
+    );
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_validates_object_and_array_section_scopes() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "{{#user}}{{name}}{{/user}}{{#items}}{{title}}{{/items}}",
+    );
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    }
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        }"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_warns_for_incompatible_schema_usage() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{#name}}x{{/name}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","properties":{"name":{"type":"string"}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("UnexpectedSchemaType"));
+    assert!(stderr.contains("name"));
+}
+
+#[test]
+fn check_command_warns_for_inverted_lambda_section() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{^markdown}}x{{/markdown}}");
+    let lambdas = write_template(
+        &dir,
+        "lambdas.json",
+        r#"{"lambdas":{"markdown":{"usage":"section","argument":{"type":"string"},"returns":{"type":"string"}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("InvalidLambdaUsage"));
+    assert!(stderr.contains("inverted"));
+}
+
+#[test]
+fn check_command_warns_for_invalid_lambda_definitions() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
+    let lambdas = write_template(
+        &dir,
+        "lambdas.json",
+        r#"{"lambdas":{"bad":{"usage":"nope"}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("LambdaInputError"));
+}
+
+#[test]
+fn check_command_warns_for_incompatible_lambda_usage() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{markdown}}");
+    let lambdas = write_template(
+        &dir,
+        "lambdas.json",
+        r#"{"lambdas":{"markdown":{"usage":"section","argument":{"type":"string"},"returns":{"type":"string"}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("InvalidLambdaUsage"));
+    assert!(stderr.contains("markdown"));
+}
+
+#[test]
 fn parse_command_accepts_file_operands_and_prints_compact_ast() {
     let dir = temp_dir();
     let template = write_template(

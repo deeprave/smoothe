@@ -1,0 +1,3 @@
+[check]
+schema = "schemas/context.json"
+lambdas = "lambdas/known.json"

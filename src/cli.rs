@@ -37,6 +37,12 @@ pub enum Commands {
 
 #[derive(Debug, Parser)]
 pub struct CheckArgs {
+    #[arg(long, value_name = "PATH|none")]
+    pub schema: Option<String>,
+
+    #[arg(long, value_name = "PATH|none")]
+    pub lambdas: Option<String>,
+
     #[arg(required = true)]
     pub inputs: Vec<String>,
 }

@@ -14,6 +14,8 @@ pub struct Configuration {
     options: GlobalConfig,
     #[serde(default)]
     check: CheckConfig,
+    #[serde(skip)]
+    source_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -22,15 +24,36 @@ struct GlobalConfig {
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct CheckConfig {}
+pub struct CheckConfig {
+    schema: Option<String>,
+    lambdas: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedGlobalOptions {
     pub color: ColorChoice,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ResolvedCheckOptions {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCheckOptions {
+    pub schema: SemanticInput,
+    pub lambdas: SemanticInput,
+}
+
+impl Default for ResolvedCheckOptions {
+    fn default() -> Self {
+        Self {
+            schema: SemanticInput::Disabled,
+            lambdas: SemanticInput::Disabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticInput {
+    Disabled,
+    Path(PathBuf),
+}
 
 #[derive(Debug)]
 pub struct CliGlobalOptions {
@@ -94,8 +117,30 @@ impl Configuration {
     }
 
     fn resolve_check_options(&self) -> ResolvedCheckOptions {
-        let _check = &self.check;
-        ResolvedCheckOptions {}
+        ResolvedCheckOptions {
+            schema: self.resolve_semantic_input(self.check.schema.as_deref()),
+            lambdas: self.resolve_semantic_input(self.check.lambdas.as_deref()),
+        }
+    }
+
+    fn resolve_semantic_input(&self, value: Option<&str>) -> SemanticInput {
+        let Some(value) = value else {
+            return SemanticInput::Disabled;
+        };
+
+        if value.eq_ignore_ascii_case("none") {
+            return SemanticInput::Disabled;
+        }
+
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            return SemanticInput::Path(path);
+        }
+
+        match &self.source_dir {
+            Some(source_dir) => SemanticInput::Path(source_dir.join(path)),
+            None => SemanticInput::Path(path),
+        }
     }
 }
 
@@ -149,15 +194,20 @@ fn read_config(path: &Path) -> Result<Option<Configuration>, ConfigError> {
         Err(error) => return Err(ConfigError::read(path, error)),
     };
 
-    toml::from_str(&source)
-        .map(Some)
-        .map_err(|error| ConfigError::parse(path, error))
+    parse_config_source(path, &source).map(Some)
 }
 
 fn read_explicit_config(path: &Path) -> Result<Configuration, ConfigError> {
     let source = fs::read_to_string(path).map_err(|error| ConfigError::read(path, error))?;
 
-    toml::from_str(&source).map_err(|error| ConfigError::parse(path, error))
+    parse_config_source(path, &source)
+}
+
+fn parse_config_source(path: &Path, source: &str) -> Result<Configuration, ConfigError> {
+    let mut configuration: Configuration =
+        toml::from_str(source).map_err(|error| ConfigError::parse(path, error))?;
+    configuration.source_dir = path.parent().map(Path::to_owned);
+    Ok(configuration)
 }
 
 fn discovery_paths() -> Vec<PathBuf> {
