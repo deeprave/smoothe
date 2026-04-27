@@ -3,10 +3,13 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Output, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::Value;
+
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn smoothe() -> Command {
     Command::new(env!("CARGO_BIN_EXE_smoothe"))
@@ -44,11 +47,15 @@ fn smoothe_with_stdin(args: &[&str], stdin: &str) -> Output {
 }
 
 fn temp_dir() -> PathBuf {
-    let unique = SystemTime::now()
+    let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("smoothe-cli-test-{unique}"));
+    let counter = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "smoothe-cli-test-{}-{timestamp}-{counter}",
+        std::process::id()
+    ));
     fs::create_dir(&dir).expect("create temp dir");
     dir
 }
@@ -70,37 +77,28 @@ fn smoothe_with_isolated_config(cwd: &std::path::Path, home: &std::path::Path) -
 }
 
 #[test]
-fn long_help_exits_successfully() {
-    let output = smoothe().arg("--help").output().expect("run smoothe");
+fn help_aliases_exit_successfully() {
+    for flag in ["--help", "-h"] {
+        let output = smoothe().arg(flag).output().expect("run smoothe");
+        let stdout = stdout(&output);
 
-    assert!(output.status.success());
-    assert!(stdout(&output).contains("Usage:"));
-    assert!(stdout(&output).contains("check  Check template syntax and correctness"));
-    assert!(stdout(&output).contains("parse  Parse templates and print AST output"));
+        assert!(output.status.success(), "{flag} should succeed");
+        assert!(stdout.contains("Usage:"), "{flag} should print usage");
+        if flag == "--help" {
+            assert!(stdout.contains("check  Check template syntax and correctness"));
+            assert!(stdout.contains("parse  Parse templates and print AST output"));
+        }
+    }
 }
 
 #[test]
-fn short_help_exits_successfully() {
-    let output = smoothe().arg("-h").output().expect("run smoothe");
+fn version_aliases_exit_successfully() {
+    for flag in ["--version", "-V"] {
+        let output = smoothe().arg(flag).output().expect("run smoothe");
 
-    assert!(output.status.success());
-    assert!(stdout(&output).contains("Usage:"));
-}
-
-#[test]
-fn long_version_exits_successfully() {
-    let output = smoothe().arg("--version").output().expect("run smoothe");
-
-    assert!(output.status.success());
-    assert_eq!(stdout(&output), "smoothe 0.1.0\n");
-}
-
-#[test]
-fn short_version_exits_successfully() {
-    let output = smoothe().arg("-V").output().expect("run smoothe");
-
-    assert!(output.status.success());
-    assert_eq!(stdout(&output), "smoothe 0.1.0\n");
+        assert!(output.status.success(), "{flag} should succeed");
+        assert_eq!(stdout(&output), "smoothe 0.1.0\n");
+    }
 }
 
 #[test]
@@ -250,27 +248,193 @@ fn parse_command_without_json_keeps_compact_tree_output() {
 }
 
 #[test]
-fn parse_command_json_projects_scalar_and_container_nodes() {
-    let output = smoothe_with_stdin(
-        &["parse", "--json", "-"],
-        "Hello {{name}}{{#items}}{{.}}{{/items}}",
-    );
-    let json = json_stdout(&output);
-    let nodes = json["inputs"][0]["ast"]["nodes"]
-        .as_array()
-        .expect("nodes array");
+fn parse_command_json_projects_reachable_node_kinds() {
+    struct JsonProjectionCase {
+        name: &'static str,
+        source: &'static str,
+        assert_json: fn(&[Value]),
+    }
 
-    assert!(output.status.success());
-    assert_eq!(nodes[0]["kind"], "text");
-    assert_eq!(nodes[0]["text"], "Hello ");
-    assert_eq!(nodes[0]["span"]["start"], 0);
-    assert_eq!(nodes[0]["span"]["end"], 6);
-    assert_eq!(nodes[1]["kind"], "escaped_variable");
-    assert_eq!(nodes[1]["name"], "name");
-    assert_eq!(nodes[2]["kind"], "section");
-    assert_eq!(nodes[2]["name"], "items");
-    assert_eq!(nodes[2]["children"][0]["kind"], "escaped_variable");
-    assert_eq!(nodes[2]["children"][0]["name"], ".");
+    let cases = [
+        JsonProjectionCase {
+            name: "text, escaped variable, and section",
+            source: "Hello {{name}}{{#items}}{{.}}{{/items}}",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "text");
+                assert_eq!(nodes[0]["text"], "Hello ");
+                assert_eq!(nodes[0]["span"]["start"], 0);
+                assert_eq!(nodes[0]["span"]["end"], 6);
+                assert_eq!(nodes[1]["kind"], "escaped_variable");
+                assert_eq!(nodes[1]["name"], "name");
+                assert_eq!(nodes[2]["kind"], "section");
+                assert_eq!(nodes[2]["name"], "items");
+                assert_eq!(nodes[2]["children"][0]["kind"], "escaped_variable");
+                assert_eq!(nodes[2]["children"][0]["name"], ".");
+            },
+        },
+        JsonProjectionCase {
+            name: "unescaped variables",
+            source: "{{{raw}}} {{& other}}",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "unescaped_variable");
+                assert_eq!(nodes[0]["name"], "raw");
+                assert_eq!(nodes[2]["kind"], "unescaped_variable");
+                assert_eq!(nodes[2]["name"], "other");
+            },
+        },
+        JsonProjectionCase {
+            name: "comment and partial",
+            source: "{{! note }}{{> header}}",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "comment");
+                assert_eq!(nodes[0]["text"], "note");
+                assert_eq!(nodes[1]["kind"], "partial");
+                assert_eq!(nodes[1]["name"], "header");
+            },
+        },
+        JsonProjectionCase {
+            name: "inverted section",
+            source: "{{^empty}}x{{/empty}}",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "inverted_section");
+                assert_eq!(nodes[0]["name"], "empty");
+                assert_eq!(nodes[0]["children"][0]["kind"], "text");
+                assert_eq!(nodes[0]["children"][0]["text"], "x");
+            },
+        },
+        JsonProjectionCase {
+            name: "dynamic partial",
+            source: "{{>* partial_name}}",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "dynamic_partial");
+                assert_eq!(nodes[0]["expression"], "partial_name");
+            },
+        },
+        JsonProjectionCase {
+            name: "parent and block",
+            source: "{{< layout}}{{$title}}Default{{/title}}{{/layout}}",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "parent");
+                assert_eq!(nodes[0]["name"]["kind"], "static");
+                assert_eq!(nodes[0]["name"]["value"], "layout");
+                assert_eq!(nodes[0]["children"][0]["kind"], "block");
+                assert_eq!(nodes[0]["children"][0]["name"], "title");
+                assert_eq!(nodes[0]["children"][0]["children"][0]["kind"], "text");
+                assert_eq!(nodes[0]["children"][0]["children"][0]["text"], "Default");
+            },
+        },
+        JsonProjectionCase {
+            name: "dynamic parent",
+            source: "{{<* parent_name}}{{/parent_name}}",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "parent");
+                assert_eq!(nodes[0]["name"]["kind"], "dynamic");
+                assert_eq!(nodes[0]["name"]["value"], "parent_name");
+            },
+        },
+        JsonProjectionCase {
+            name: "delimiter change",
+            source: "{{=<% %>=}}<%name%>",
+            assert_json: |nodes| {
+                assert_eq!(nodes[0]["kind"], "delimiter_change");
+                assert_eq!(nodes[0]["open"], "<%");
+                assert_eq!(nodes[0]["close"], "%>");
+                assert_eq!(nodes[1]["kind"], "escaped_variable");
+                assert_eq!(nodes[1]["name"], "name");
+            },
+        },
+    ];
+
+    for case in cases {
+        let output = smoothe_with_stdin(&["parse", "--json", "-"], case.source);
+        let json = json_stdout(&output);
+        let nodes = json["inputs"][0]["ast"]["nodes"]
+            .as_array()
+            .expect("nodes array");
+
+        assert!(output.status.success(), "{} should parse", case.name);
+        (case.assert_json)(nodes);
+    }
+}
+
+#[test]
+fn parse_command_compact_output_projects_reachable_node_kinds() {
+    struct CompactProjectionCase {
+        name: &'static str,
+        source: &'static str,
+        expected_fragments: &'static [&'static str],
+    }
+
+    let cases = [
+        CompactProjectionCase {
+            name: "unescaped variables",
+            source: "{{{raw}}} {{& other}}",
+            expected_fragments: &[
+                "unescaped_variable name=\"raw\" span=",
+                "text value=\" \" span=",
+                "unescaped_variable name=\"other\" span=",
+            ],
+        },
+        CompactProjectionCase {
+            name: "comment and partial",
+            source: "{{! note }}{{> header}}",
+            expected_fragments: &[
+                "comment text=\"note\" span=",
+                "partial name=\"header\" span=",
+            ],
+        },
+        CompactProjectionCase {
+            name: "inverted section",
+            source: "{{^empty}}x{{/empty}}",
+            expected_fragments: &[
+                "inverted_section name=\"empty\" span=",
+                "children=1",
+                "text value=\"x\" span=",
+            ],
+        },
+        CompactProjectionCase {
+            name: "dynamic partial",
+            source: "{{>* partial_name}}",
+            expected_fragments: &["dynamic_partial expression=\"partial_name\" span="],
+        },
+        CompactProjectionCase {
+            name: "static parent and block",
+            source: "{{< layout}}{{$title}}Default{{/title}}{{/layout}}",
+            expected_fragments: &[
+                "parent name=static:\"layout\" span=",
+                "block name=\"title\" span=",
+                "text value=\"Default\" span=",
+            ],
+        },
+        CompactProjectionCase {
+            name: "dynamic parent",
+            source: "{{<* parent_name}}{{/parent_name}}",
+            expected_fragments: &["parent name=dynamic:\"parent_name\" span="],
+        },
+        CompactProjectionCase {
+            name: "delimiter change",
+            source: "{{=<% %>=}}<%name%>",
+            expected_fragments: &[
+                "delimiter_change open=\"<%\" close=\"%>\" span=",
+                "escaped_variable name=\"name\" span=",
+            ],
+        },
+    ];
+
+    for case in cases {
+        let output = smoothe_with_stdin(&["parse", "-"], case.source);
+        let stdout = stdout(&output);
+
+        assert!(output.status.success(), "{} should parse", case.name);
+        assert!(stderr(&output).is_empty(), "{} should not warn", case.name);
+        for fragment in case.expected_fragments {
+            assert!(
+                stdout.contains(fragment),
+                "{} should contain compact fragment {fragment:?}; stdout was:\n{stdout}",
+                case.name
+            );
+        }
+    }
 }
 
 #[test]
@@ -388,29 +552,21 @@ fn parse_command_processes_multiple_operands_in_order() {
 }
 
 #[test]
-fn check_command_reports_missing_file() {
-    let output = smoothe()
-        .args(["check", "missing.mustache"])
-        .output()
-        .expect("run smoothe");
-    let stderr = stderr(&output);
+fn commands_report_missing_file() {
+    for command in ["check", "parse"] {
+        let output = smoothe()
+            .args([command, "missing.mustache"])
+            .output()
+            .expect("run smoothe");
+        let stderr = stderr(&output);
 
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(stderr.contains("error: failed to read missing.mustache:"));
-}
-
-#[test]
-fn parse_command_reports_missing_file() {
-    let output = smoothe()
-        .args(["parse", "missing.mustache"])
-        .output()
-        .expect("run smoothe");
-    let stderr = stderr(&output);
-
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(stderr.contains("error: failed to read missing.mustache:"));
+        assert!(!output.status.success(), "{command} should fail");
+        assert!(
+            output.stdout.is_empty(),
+            "{command} should not write stdout"
+        );
+        assert!(stderr.contains("error: failed to read missing.mustache:"));
+    }
 }
 
 #[test]
@@ -440,6 +596,25 @@ fn parse_command_writes_output_file_and_suppresses_standard_output() {
 }
 
 #[test]
+fn parse_command_reports_output_write_failure() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "valid.mustache", "Hello {{name}}");
+    let output = smoothe()
+        .arg("parse")
+        .arg("--out")
+        .arg(&dir)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(stderr.contains("error: failed to write"));
+    assert!(stderr.contains(&dir.display().to_string()));
+}
+
+#[test]
 fn no_default_command_is_dispatched() {
     let output = smoothe().output().expect("run smoothe");
 
@@ -447,94 +622,59 @@ fn no_default_command_is_dispatched() {
 }
 
 #[test]
-fn long_color_option_dispatches_check() {
-    let dir = temp_dir();
-    let template = write_template(
-        &dir,
-        "valid.mustache",
-        include_str!("../fixtures/parse-valid.mustache"),
-    );
-    let output = smoothe()
-        .args(["--color", "always", "check"])
-        .arg(&template)
-        .output()
-        .expect("run smoothe");
+fn color_inputs_dispatch_check() {
+    struct ColorCase<'a> {
+        args: &'a [&'a str],
+        environment: Option<(&'a str, &'a str)>,
+    }
 
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-}
+    let cases = [
+        ColorCase {
+            args: &["--color", "always", "check"],
+            environment: None,
+        },
+        ColorCase {
+            args: &["--colour", "always", "check"],
+            environment: None,
+        },
+        ColorCase {
+            args: &["-c", "always", "check"],
+            environment: None,
+        },
+        ColorCase {
+            args: &["--no-color", "check"],
+            environment: None,
+        },
+        ColorCase {
+            args: &["check"],
+            environment: Some(("NOCOLOR", "1")),
+        },
+    ];
 
-#[test]
-fn long_colour_alias_dispatches_check() {
-    let dir = temp_dir();
-    let template = write_template(
-        &dir,
-        "valid.mustache",
-        include_str!("../fixtures/parse-valid.mustache"),
-    );
-    let output = smoothe()
-        .args(["--colour", "always", "check"])
-        .arg(&template)
-        .output()
-        .expect("run smoothe");
+    for case in cases {
+        let dir = temp_dir();
+        let template = write_template(
+            &dir,
+            "valid.mustache",
+            include_str!("../fixtures/parse-valid.mustache"),
+        );
+        let mut command = smoothe();
+        if let Some((name, value)) = case.environment {
+            command.env(name, value);
+        }
+        let output = command
+            .args(case.args)
+            .arg(&template)
+            .output()
+            .expect("run smoothe");
 
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-}
-
-#[test]
-fn short_color_alias_dispatches_check() {
-    let dir = temp_dir();
-    let template = write_template(
-        &dir,
-        "valid.mustache",
-        include_str!("../fixtures/parse-valid.mustache"),
-    );
-    let output = smoothe()
-        .args(["-c", "always", "check"])
-        .arg(&template)
-        .output()
-        .expect("run smoothe");
-
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-}
-
-#[test]
-fn no_color_flag_dispatches_check() {
-    let dir = temp_dir();
-    let template = write_template(
-        &dir,
-        "valid.mustache",
-        include_str!("../fixtures/parse-valid.mustache"),
-    );
-    let output = smoothe()
-        .args(["--no-color", "check"])
-        .arg(&template)
-        .output()
-        .expect("run smoothe");
-
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-}
-
-#[test]
-fn nocolor_environment_dispatches_check() {
-    let dir = temp_dir();
-    let template = write_template(
-        &dir,
-        "valid.mustache",
-        include_str!("../fixtures/parse-valid.mustache"),
-    );
-    let output = smoothe()
-        .env("NOCOLOR", "1")
-        .arg("check")
-        .arg(&template)
-        .output()
-        .expect("run smoothe");
-
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
+        assert!(output.status.success(), "{:?} should succeed", case.args);
+        assert!(
+            output.stdout.is_empty(),
+            "{:?} should not write stdout",
+            case.args
+        );
+    }
 }
 
 #[test]

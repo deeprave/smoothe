@@ -6,76 +6,63 @@ fn parse_config(source: &str) -> config::Configuration {
 }
 
 #[test]
-fn defaults_resolve_to_auto_color() {
-    let config = parse_config("");
-    let options = config::resolve_with_environment(
-        &config,
-        &config::CliGlobalOptions {
-            color: None,
-            no_color: false,
-        },
-        config::EnvironmentOptions { nocolor: false },
-    );
+fn color_options_resolve_by_precedence() {
+    let cases = [
+        (
+            "defaults resolve to auto",
+            "",
+            None,
+            false,
+            false,
+            ColorChoice::Auto,
+        ),
+        (
+            "config overrides built-in default",
+            "[options]\ncolor = false\n",
+            None,
+            false,
+            false,
+            ColorChoice::Never,
+        ),
+        (
+            "environment overrides config",
+            "[options]\ncolor = true\n",
+            None,
+            false,
+            true,
+            ColorChoice::Never,
+        ),
+        (
+            "cli color overrides environment",
+            "[options]\ncolor = false\n",
+            Some(ColorChoice::Always),
+            false,
+            true,
+            ColorChoice::Always,
+        ),
+        (
+            "cli no-color overrides cli color",
+            "[options]\ncolor = \"always\"\n",
+            Some(ColorChoice::Always),
+            true,
+            false,
+            ColorChoice::Never,
+        ),
+    ];
 
-    assert_eq!(options.global.color, ColorChoice::Auto);
-}
+    for (name, source, cli_color, cli_no_color, env_nocolor, expected) in cases {
+        let config = parse_config(source);
+        let options = config::resolve_with_environment(
+            &config,
+            &config::CliGlobalOptions {
+                color: cli_color,
+                no_color: cli_no_color,
+            },
+            config::EnvironmentOptions {
+                nocolor: env_nocolor,
+            },
+        );
 
-#[test]
-fn config_overrides_built_in_color_default() {
-    let config = parse_config("[options]\ncolor = false\n");
-    let options = config::resolve_with_environment(
-        &config,
-        &config::CliGlobalOptions {
-            color: None,
-            no_color: false,
-        },
-        config::EnvironmentOptions { nocolor: false },
-    );
-
-    assert_eq!(options.global.color, ColorChoice::Never);
-}
-
-#[test]
-fn environment_overrides_config_color() {
-    let config = parse_config("[options]\ncolor = true\n");
-    let options = config::resolve_with_environment(
-        &config,
-        &config::CliGlobalOptions {
-            color: None,
-            no_color: false,
-        },
-        config::EnvironmentOptions { nocolor: true },
-    );
-
-    assert_eq!(options.global.color, ColorChoice::Never);
-}
-
-#[test]
-fn cli_color_overrides_environment_color() {
-    let config = parse_config("[options]\ncolor = false\n");
-    let options = config::resolve_with_environment(
-        &config,
-        &config::CliGlobalOptions {
-            color: Some(ColorChoice::Always),
-            no_color: false,
-        },
-        config::EnvironmentOptions { nocolor: true },
-    );
-
-    assert_eq!(options.global.color, ColorChoice::Always);
-}
-
-#[test]
-fn cli_no_color_overrides_cli_color() {
-    let config = parse_config("[options]\ncolor = \"always\"\n");
-    let options = config::resolve_with_environment(
-        &config,
-        &config::CliGlobalOptions {
-            color: Some(ColorChoice::Always),
-            no_color: true,
-        },
-        config::EnvironmentOptions { nocolor: false },
-    );
-
-    assert_eq!(options.global.color, ColorChoice::Never);
+        assert_eq!(options.global.color, expected, "{name}");
+    }
 }
