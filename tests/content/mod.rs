@@ -7,6 +7,7 @@ use std::{
 use smoothe::{
     content::{ContentInput, FrontmatterFormat, process},
     parser::{DiagnosticSeverity, IssueKind, Node, PartialMapping, SourceMetadata},
+    source_prepare::prepare_source,
 };
 
 fn temp_template_root() -> PathBuf {
@@ -48,6 +49,64 @@ fn content_result_preserves_raw_data_and_body_position() {
         vec![Node::escaped_variable("title", 21..30)]
     );
     assert!(result.state.diagnostics.is_empty());
+}
+
+#[test]
+fn reusable_source_preparation_extracts_frontmatter_and_body_position() {
+    let prepared = prepare_source("---\ntitle: Hello\n---\n{{title}}", "template.mustache");
+
+    assert_eq!(prepared.frontmatter.format, Some(FrontmatterFormat::Yaml));
+    assert_eq!(prepared.frontmatter.context["title"], "Hello");
+    assert_eq!(prepared.body_offset, 21);
+    assert_eq!(prepared.body_start_line, 4);
+    assert!(prepared.diagnostics.is_empty());
+}
+
+#[test]
+fn reusable_source_preparation_skips_partial_frontmatter_without_parent_merge() {
+    let prepared = prepare_source("---\npartial: true\n---\n{{name}}", "_partial.mustache");
+
+    assert_eq!(prepared.frontmatter.context["partial"], true);
+    assert_eq!(prepared.body_offset, 22);
+    assert_eq!(prepared.body_start_line, 4);
+    assert!(prepared.diagnostics.is_empty());
+}
+
+#[test]
+fn reusable_source_preparation_accepts_crlf_frontmatter_delimiters() {
+    let prepared = prepare_source(
+        "---\r\ntitle: Hello\r\n---\r\n{{title}}",
+        "template.mustache",
+    );
+
+    assert_eq!(prepared.frontmatter.format, Some(FrontmatterFormat::Yaml));
+    assert_eq!(prepared.frontmatter.context["title"], "Hello");
+    assert_eq!(prepared.body_start_line, 4);
+    assert!(prepared.diagnostics.is_empty());
+}
+
+#[test]
+fn reusable_source_preparation_accepts_spaced_frontmatter_delimiters() {
+    let prepared = prepare_source(
+        "---   \ntitle: Hello\n---   \n{{title}}",
+        "template.mustache",
+    );
+
+    assert_eq!(prepared.frontmatter.format, Some(FrontmatterFormat::Yaml));
+    assert_eq!(prepared.frontmatter.context["title"], "Hello");
+    assert_eq!(prepared.body_start_line, 4);
+    assert!(prepared.diagnostics.is_empty());
+}
+
+#[test]
+fn reusable_source_preparation_accepts_closing_delimiter_at_eof() {
+    let prepared = prepare_source("---\ntitle: Hello\n---", "template.mustache");
+
+    assert_eq!(prepared.frontmatter.format, Some(FrontmatterFormat::Yaml));
+    assert_eq!(prepared.frontmatter.context["title"], "Hello");
+    assert_eq!(prepared.body_offset, 20);
+    assert_eq!(prepared.body_start_line, 3);
+    assert!(prepared.diagnostics.is_empty());
 }
 
 #[test]

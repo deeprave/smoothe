@@ -5,7 +5,9 @@ mod source;
 
 use std::{collections::HashSet, fs, ops::Range, path::PathBuf};
 
-pub use ast::{Ast, Delimiters, Node, TemplateName};
+use crate::source_prepare::prepare_source;
+
+pub use ast::{Ast, Delimiters, Node, TemplateName, TemplateUnit};
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, IssueKind, ParseEvent};
 pub use input::{FeedbackHandlers, LambdaSpec, ParserInput, PartialMapping, SourceMetadata};
 pub use source::{SourceLocation, SourceSpan};
@@ -86,6 +88,8 @@ struct Parser<'a> {
     lambdas: Vec<LambdaSpec>,
     context_schema: Option<serde_json::Value>,
     expand_partials: bool,
+    template_units: Vec<Option<TemplateUnit>>,
+    template_paths: Vec<PathBuf>,
     state: ParserState,
 }
 
@@ -106,6 +110,8 @@ impl<'a> Parser<'a> {
             lambdas: input.lambdas,
             context_schema: input.context_schema,
             expand_partials,
+            template_units: Vec::new(),
+            template_paths: Vec::new(),
             state: ParserState {
                 diagnostics: Vec::new(),
                 delimiters: Delimiters::default(),
@@ -121,18 +127,32 @@ impl<'a> Parser<'a> {
     }
 
     fn parse(mut self) -> ParseResult {
-        let nodes = self.parse_nodes(None, self.body_offset).nodes;
+        let mut nodes = self.parse_nodes(None, self.body_offset).nodes;
         self.classify_lambdas(&nodes);
         self.index_advanced_nodes(&nodes);
         self.check_schema_references(&nodes);
         if self.expand_partials {
-            self.expand_partial_references(&nodes);
+            let context = SourceContext {
+                name: self.source_name.clone(),
+                source: self.source.to_owned(),
+                root: self.source_root.clone(),
+                body_offset: self.body_offset,
+                body_start_line: self.body_start_line,
+            };
+            self.resolve_partial_nodes(&mut nodes, &context, &mut Vec::new());
         } else {
             self.record_nested_partials(&nodes);
         }
 
+        let template_units = std::mem::take(&mut self.template_units)
+            .into_iter()
+            .flatten()
+            .collect();
         ParseResult {
-            ast: Ast { nodes },
+            ast: Ast {
+                nodes,
+                template_units,
+            },
             state: self.state,
         }
     }
@@ -407,59 +427,168 @@ impl<'a> Parser<'a> {
         Some(TagKind::Parent(TemplateName::Static(name.to_owned())))
     }
 
-    fn expand_partial_references(&mut self, nodes: &[Node]) {
-        if self.partials.is_empty() {
-            return;
-        }
-
-        for partial in collect_partial_nodes(nodes) {
-            let Some(mapping) = self
-                .partials
-                .iter()
-                .find(|mapping| mapping.name == partial.name)
-                .cloned()
-            else {
-                self.emit(
-                    DiagnosticSeverity::Warning,
-                    IssueKind::UnresolvedPartial,
-                    partial.span.start..partial.span.end,
-                    format!("unresolved partial `{}`", partial.name),
-                );
-                continue;
-            };
-
-            let path = self.resolve_partial_path(&mapping.path);
-            match fs::read_to_string(&path) {
-                Ok(source) => {
-                    let mut input =
-                        ParserInput::new(SourceMetadata::new(path.to_string_lossy()), &source);
-                    input.partials = self.partials.clone();
-                    input.lambdas = self.lambdas.clone();
-                    input.context_schema = self.context_schema.clone();
-                    let parsed = Parser::new_with_partial_expansion(input, false).parse();
-                    self.state.diagnostics.extend(parsed.state.diagnostics);
-                    self.state
-                        .nested_partials
-                        .extend(parsed.state.nested_partials);
-                    self.state
-                        .lambda_references
-                        .extend(parsed.state.lambda_references);
-                    self.state.partials.push(ParsedPartial {
-                        name: mapping.name,
-                        path,
-                        ast: parsed.ast,
-                    });
+    fn resolve_partial_nodes(
+        &mut self,
+        nodes: &mut [Node],
+        context: &SourceContext,
+        active_paths: &mut Vec<PathBuf>,
+    ) {
+        for node in nodes {
+            match node {
+                Node::Partial { name, span } => {
+                    if let Some(resolved) =
+                        self.resolve_partial_node(name, span, context, active_paths)
+                    {
+                        *node = resolved;
+                    }
                 }
-                Err(error) => {
-                    self.emit(
-                        DiagnosticSeverity::Warning,
-                        IssueKind::UnresolvedPartial,
-                        partial.span.start..partial.span.end,
-                        format!("unresolved partial `{}`: {error}", partial.name),
-                    );
+                Node::Section { children, .. }
+                | Node::InvertedSection { children, .. }
+                | Node::LambdaSection { children, .. }
+                | Node::Parent { children, .. }
+                | Node::Block { children, .. } => {
+                    self.resolve_partial_nodes(children, context, active_paths);
                 }
+                Node::Text { .. }
+                | Node::EscapedVariable { .. }
+                | Node::LambdaVariable { .. }
+                | Node::UnescapedVariable { .. }
+                | Node::Comment { .. }
+                | Node::ResolvedPartial { .. }
+                | Node::DynamicPartial { .. }
+                | Node::DelimiterChange { .. } => {}
             }
         }
+    }
+
+    fn resolve_partial_node(
+        &mut self,
+        name: &str,
+        span: &Range<usize>,
+        context: &SourceContext,
+        active_paths: &mut Vec<PathBuf>,
+    ) -> Option<Node> {
+        let Some(mapping) = self
+            .partials
+            .iter()
+            .find(|mapping| mapping.name == name)
+            .cloned()
+        else {
+            self.emit_for_context(
+                DiagnosticSeverity::Error,
+                IssueKind::UnresolvedPartial,
+                context,
+                span.clone(),
+                format!("unresolved partial `{name}`"),
+            );
+            return None;
+        };
+
+        let path = resolve_partial_path(context.root.as_ref(), &mapping.path);
+        let existing_id = self
+            .template_paths
+            .iter()
+            .position(|existing| existing == &path);
+        if let Some(template_id) = existing_id
+            && active_paths.contains(&path)
+        {
+            return Some(Node::resolved_partial(
+                name.to_owned(),
+                span.clone(),
+                path,
+                template_id,
+                true,
+            ));
+        }
+
+        let template_id = match existing_id {
+            Some(template_id) => template_id,
+            None => match self.parse_partial_unit(&mapping.name, &path, active_paths) {
+                Ok(template_id) => template_id,
+                Err(error) => {
+                    self.emit_for_context(
+                        DiagnosticSeverity::Error,
+                        IssueKind::UnresolvedPartial,
+                        context,
+                        span.clone(),
+                        format!("unresolved partial `{name}`: {error}"),
+                    );
+                    return None;
+                }
+            },
+        };
+
+        Some(Node::resolved_partial(
+            name.to_owned(),
+            span.clone(),
+            path,
+            template_id,
+            false,
+        ))
+    }
+
+    fn parse_partial_unit(
+        &mut self,
+        name: &str,
+        path: &PathBuf,
+        active_paths: &mut Vec<PathBuf>,
+    ) -> Result<usize, std::io::Error> {
+        let source = fs::read_to_string(path)?;
+        let prepared = prepare_source(&source, &path.to_string_lossy());
+        self.extend_diagnostics(prepared.diagnostics);
+
+        let mut source_metadata = SourceMetadata::new(path.to_string_lossy())
+            .with_body_start(prepared.body_offset, prepared.body_start_line);
+        if let Some(root) = self.source_root.clone() {
+            source_metadata = source_metadata.with_root(root);
+        }
+        let mut input = ParserInput::new(source_metadata.clone(), &source);
+        input.partials = self.partials.clone();
+        input.lambdas = self.lambdas.clone();
+        input.context_schema = self.context_schema.clone();
+        let parsed = Parser::new_with_partial_expansion(input, false).parse();
+        self.extend_diagnostics(parsed.state.diagnostics);
+        self.state
+            .lambda_references
+            .extend(parsed.state.lambda_references);
+        self.state
+            .parent_references
+            .extend(parsed.state.parent_references);
+        self.state
+            .block_definitions
+            .extend(parsed.state.block_definitions);
+        self.state.dynamic_names.extend(parsed.state.dynamic_names);
+
+        let template_id = self.template_units.len();
+        self.template_paths.push(path.clone());
+        self.template_units.push(None);
+        let context = SourceContext {
+            name: path.to_string_lossy().into_owned(),
+            source: source.clone(),
+            root: self.source_root.clone(),
+            body_offset: prepared.body_offset,
+            body_start_line: prepared.body_start_line,
+        };
+        let mut nodes = parsed.ast.nodes;
+        active_paths.push(path.clone());
+        self.resolve_partial_nodes(&mut nodes, &context, active_paths);
+        active_paths.pop();
+
+        self.state.partials.push(ParsedPartial {
+            name: name.to_owned(),
+            path: path.clone(),
+            ast: Ast::new(nodes.clone()),
+        });
+        self.template_units[template_id] = Some(TemplateUnit {
+            id: template_id,
+            name: name.to_owned(),
+            path: path.clone(),
+            source: source_metadata,
+            raw_data: source,
+            nodes,
+        });
+
+        Ok(template_id)
     }
 
     fn record_nested_partials(&mut self, nodes: &[Node]) {
@@ -555,6 +684,7 @@ impl<'a> Parser<'a> {
                 | Node::UnescapedVariable { .. }
                 | Node::Comment { .. }
                 | Node::Partial { .. }
+                | Node::ResolvedPartial { .. }
                 | Node::DelimiterChange { .. } => {}
             }
         }
@@ -584,16 +714,6 @@ impl<'a> Parser<'a> {
                 );
             }
         }
-    }
-
-    fn resolve_partial_path(&self, path: &PathBuf) -> PathBuf {
-        if path.is_absolute() {
-            return path.clone();
-        }
-
-        self.source_root
-            .as_ref()
-            .map_or_else(|| path.clone(), |root| root.join(path))
     }
 
     fn is_lambda(&self, name: &str) -> bool {
@@ -658,6 +778,64 @@ impl<'a> Parser<'a> {
         self.state.diagnostics.push(diagnostic);
     }
 
+    fn emit_for_context(
+        &mut self,
+        severity: DiagnosticSeverity,
+        issue: IssueKind,
+        context: &SourceContext,
+        span: Range<usize>,
+        message: impl Into<String>,
+    ) {
+        self.state.recovered = true;
+        let diagnostic = Diagnostic {
+            severity,
+            issue,
+            source_name: context.name.clone(),
+            location: location_for_context(context, span.start),
+            span: SourceSpan::new(span.start, span.end),
+            message: message.into(),
+        };
+        self.push_diagnostic(diagnostic);
+    }
+
+    fn extend_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        if !diagnostics.is_empty() {
+            self.state.recovered = true;
+        }
+        self.state.diagnostics.extend(diagnostics);
+    }
+
+    fn push_diagnostic(&mut self, diagnostic: Diagnostic) {
+        let event = ParseEvent {
+            diagnostic: diagnostic.clone(),
+        };
+
+        match diagnostic.severity {
+            DiagnosticSeverity::Error => {
+                if let Some(handler) = &self.feedback.on_error {
+                    handler(&event);
+                }
+            }
+            DiagnosticSeverity::Warning => {
+                if let Some(handler) = &self.feedback.on_warning {
+                    handler(&event);
+                }
+            }
+            DiagnosticSeverity::Info => {
+                if let Some(handler) = &self.feedback.on_info {
+                    handler(&event);
+                }
+            }
+            DiagnosticSeverity::Debug => {
+                if let Some(handler) = &self.feedback.on_debug {
+                    handler(&event);
+                }
+            }
+        }
+
+        self.state.diagnostics.push(diagnostic);
+    }
+
     fn location_for_offset(&self, offset: usize) -> SourceLocation {
         if offset < self.body_offset {
             return SourceLocation::for_offset(self.source, offset);
@@ -668,6 +846,33 @@ impl<'a> Parser<'a> {
         location.line += self.body_start_line.saturating_sub(1);
         location
     }
+}
+
+struct SourceContext {
+    name: String,
+    source: String,
+    root: Option<PathBuf>,
+    body_offset: usize,
+    body_start_line: usize,
+}
+
+fn resolve_partial_path(root: Option<&PathBuf>, path: &PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path.clone();
+    }
+
+    root.map_or_else(|| path.clone(), |root| root.join(path))
+}
+
+fn location_for_context(context: &SourceContext, offset: usize) -> SourceLocation {
+    if offset < context.body_offset {
+        return SourceLocation::for_offset(&context.source, offset);
+    }
+
+    let relative = offset - context.body_offset;
+    let mut location = SourceLocation::for_offset(&context.source[context.body_offset..], relative);
+    location.line += context.body_start_line.saturating_sub(1);
+    location
 }
 
 #[derive(Debug, Clone)]
@@ -743,6 +948,7 @@ fn collect_partial_nodes_into(nodes: &[Node], partials: &mut Vec<NamedSpan>) {
             | Node::LambdaVariable { .. }
             | Node::UnescapedVariable { .. }
             | Node::Comment { .. }
+            | Node::ResolvedPartial { .. }
             | Node::DynamicPartial { .. }
             | Node::DelimiterChange { .. } => {}
         }
@@ -791,6 +997,7 @@ fn collect_reference_nodes_into(nodes: &[Node], references: &mut Vec<NamedSpan>)
             Node::Text { .. }
             | Node::Comment { .. }
             | Node::Partial { .. }
+            | Node::ResolvedPartial { .. }
             | Node::DynamicPartial { .. }
             | Node::DelimiterChange { .. } => {}
         }

@@ -1,7 +1,29 @@
-use std::ops::Range;
+use std::{ops::Range, path::PathBuf};
+
+use super::input::SourceMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ast {
+    pub nodes: Vec<Node>,
+    pub template_units: Vec<TemplateUnit>,
+}
+
+impl Ast {
+    pub fn new(nodes: Vec<Node>) -> Self {
+        Self {
+            nodes,
+            template_units: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateUnit {
+    pub id: usize,
+    pub name: String,
+    pub path: PathBuf,
+    pub source: SourceMetadata,
+    pub raw_data: String,
     pub nodes: Vec<Node>,
 }
 
@@ -45,6 +67,13 @@ pub enum Node {
     Partial {
         name: String,
         span: Range<usize>,
+    },
+    ResolvedPartial {
+        name: String,
+        span: Range<usize>,
+        resolved_path: PathBuf,
+        template_id: usize,
+        recursive: bool,
     },
     DynamicPartial {
         expression: String,
@@ -139,6 +168,22 @@ impl Node {
         Self::Partial {
             name: name.into(),
             span,
+        }
+    }
+
+    pub fn resolved_partial(
+        name: impl Into<String>,
+        span: Range<usize>,
+        resolved_path: impl Into<PathBuf>,
+        template_id: usize,
+        recursive: bool,
+    ) -> Self {
+        Self::ResolvedPartial {
+            name: name.into(),
+            span,
+            resolved_path: resolved_path.into(),
+            template_id,
+            recursive,
         }
     }
 

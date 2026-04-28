@@ -127,12 +127,43 @@ impl JsonInputResult {
 #[derive(Serialize)]
 struct JsonAst {
     nodes: Vec<JsonNode>,
+    template_units: Vec<JsonTemplateUnit>,
 }
 
 impl From<&Ast> for JsonAst {
     fn from(ast: &Ast) -> Self {
         Self {
             nodes: ast.nodes.iter().map(JsonNode::from).collect(),
+            template_units: ast
+                .template_units
+                .iter()
+                .map(JsonTemplateUnit::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonTemplateUnit {
+    id: usize,
+    name: String,
+    path: String,
+    source: String,
+    body_offset: usize,
+    body_start_line: usize,
+    nodes: Vec<JsonNode>,
+}
+
+impl From<&smoothe::parser::TemplateUnit> for JsonTemplateUnit {
+    fn from(unit: &smoothe::parser::TemplateUnit) -> Self {
+        Self {
+            id: unit.id,
+            name: unit.name.clone(),
+            path: unit.path.display().to_string(),
+            source: unit.source.name.clone(),
+            body_offset: unit.source.body_offset,
+            body_start_line: unit.source.body_start_line,
+            nodes: unit.nodes.iter().map(JsonNode::from).collect(),
         }
     }
 }
@@ -226,6 +257,13 @@ enum JsonNode {
         name: String,
         span: JsonSpan,
     },
+    ResolvedPartial {
+        name: String,
+        span: JsonSpan,
+        resolved_path: String,
+        template_id: usize,
+        recursive: bool,
+    },
     DynamicPartial {
         expression: String,
         span: JsonSpan,
@@ -301,6 +339,19 @@ impl From<&Node> for JsonNode {
                 name: name.clone(),
                 span: JsonSpan::from(span),
             },
+            Node::ResolvedPartial {
+                name,
+                span,
+                resolved_path,
+                template_id,
+                recursive,
+            } => Self::ResolvedPartial {
+                name: name.clone(),
+                span: JsonSpan::from(span),
+                resolved_path: resolved_path.display().to_string(),
+                template_id: *template_id,
+                recursive: *recursive,
+            },
             Node::DynamicPartial { expression, span } => Self::DynamicPartial {
                 expression: expression.clone(),
                 span: JsonSpan::from(span),
@@ -357,6 +408,20 @@ fn format_ast(input_name: &str, ast: &Ast) -> String {
 
     if ast.nodes.is_empty() {
         output.push_str("  <empty>\n");
+    }
+
+    for unit in &ast.template_units {
+        output.push_str(&format!(
+            "  template_unit id={} name={} path={} body_offset={} body_start_line={}\n",
+            unit.id,
+            quote(&unit.name),
+            quote(&unit.path.display().to_string()),
+            unit.source.body_offset,
+            unit.source.body_start_line
+        ));
+        for node in &unit.nodes {
+            format_node(node, 1, &mut output);
+        }
     }
 
     output
@@ -436,6 +501,22 @@ fn format_node(node: &Node, depth: usize, output: &mut String) {
             output.push_str(&format!(
                 "{indent}partial name={} span={}\n",
                 quote(name),
+                format_span(span)
+            ));
+        }
+        Node::ResolvedPartial {
+            name,
+            span,
+            resolved_path,
+            template_id,
+            recursive,
+        } => {
+            output.push_str(&format!(
+                "{indent}resolved_partial name={} path={} template_id={} recursive={} span={}\n",
+                quote(name),
+                quote(&resolved_path.display().to_string()),
+                template_id,
+                recursive,
                 format_span(span)
             ));
         }

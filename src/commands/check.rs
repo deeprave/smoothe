@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -9,7 +9,8 @@ use serde::Deserialize;
 use smoothe::config::{ResolvedCheckOptions, ResolvedGlobalOptions, SemanticInput};
 use smoothe::content::{ContentInput, process as process_template};
 use smoothe::parser::{
-    Diagnostic, DiagnosticSeverity, IssueKind, Node, SourceLocation, SourceMetadata, SourceSpan,
+    Ast, Diagnostic, DiagnosticSeverity, IssueKind, Node, SourceLocation, SourceMetadata,
+    SourceSpan, TemplateUnit,
 };
 
 use crate::cli::CheckArgs;
@@ -53,7 +54,7 @@ pub fn check(
         for diagnostic in validate_semantics(
             &result.raw_data,
             &input.name,
-            &result.ast.nodes,
+            &result.ast,
             schema.as_ref(),
             &lambdas,
         ) {
@@ -242,206 +243,202 @@ fn input_diagnostic(issue: IssueKind, path: &Path, message: String) -> Diagnosti
 fn validate_semantics(
     source: &str,
     source_name: &str,
-    nodes: &[Node],
+    ast: &Ast,
     schema: Option<&ContextSchema>,
     lambdas: &HashMap<String, LambdaDefinition>,
 ) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-    validate_nodes(
-        source,
-        source_name,
-        nodes,
-        schema.map(ContextSchema::root),
+    let mut validation = SemanticValidation {
+        template_units: &ast.template_units,
+        scope_schema: schema.map(ContextSchema::root),
         lambdas,
-        &mut diagnostics,
-    );
-    diagnostics
+        diagnostics: Vec::new(),
+        in_progress_template_units: HashSet::new(),
+    };
+    validation.validate_nodes(source, source_name, &ast.nodes);
+    validation.diagnostics
 }
 
-fn validate_nodes(
-    source: &str,
-    source_name: &str,
-    nodes: &[Node],
-    scope_schema: Option<&serde_json::Value>,
-    lambdas: &HashMap<String, LambdaDefinition>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for node in nodes {
-        match node {
-            Node::EscapedVariable { name, span } | Node::UnescapedVariable { name, span } => {
-                if let Some(lambda) = lambdas.get(name) {
-                    if lambda.usage != LambdaUsage::Variable {
-                        diagnostics.push(source_diagnostic(
+struct SemanticValidation<'a> {
+    template_units: &'a [TemplateUnit],
+    scope_schema: Option<&'a serde_json::Value>,
+    lambdas: &'a HashMap<String, LambdaDefinition>,
+    diagnostics: Vec<Diagnostic>,
+    in_progress_template_units: HashSet<usize>,
+}
+
+impl SemanticValidation<'_> {
+    fn validate_nodes(&mut self, source: &str, source_name: &str, nodes: &[Node]) {
+        for node in nodes {
+            match node {
+                Node::EscapedVariable { name, span } | Node::UnescapedVariable { name, span } => {
+                    self.validate_variable(source, source_name, name, span);
+                }
+                Node::Section {
+                    name,
+                    span,
+                    children,
+                } => self.validate_section(source, source_name, name, span, children),
+                Node::InvertedSection {
+                    name,
+                    span,
+                    children,
+                } => {
+                    if self.lambdas.contains_key(name) {
+                        self.diagnostics.push(source_diagnostic(
                             IssueKind::InvalidLambdaUsage,
                             source,
                             source_name,
                             span,
-                            format!("lambda `{name}` is not valid as a variable"),
+                            format!("inverted lambda section `{name}` is unsupported"),
                         ));
+                    } else {
+                        self.validate_schema_path(source, source_name, name, span);
                     }
-                    continue;
+                    self.validate_nodes(source, source_name, children);
                 }
-                validate_schema_path(source, source_name, scope_schema, name, span, diagnostics);
-            }
-            Node::Section {
-                name,
-                span,
-                children,
-            } => {
-                if let Some(lambda) = lambdas.get(name) {
-                    if lambda.usage != LambdaUsage::Section {
-                        diagnostics.push(source_diagnostic(
+                Node::LambdaVariable { name, span } => {
+                    if !self.lambdas.contains_key(name) {
+                        self.diagnostics.push(source_diagnostic(
                             IssueKind::InvalidLambdaUsage,
                             source,
                             source_name,
                             span,
-                            format!("lambda `{name}` is not valid as a section"),
+                            format!("lambda `{name}` is not defined"),
                         ));
                     }
-                    validate_nodes(
-                        source,
-                        source_name,
-                        children,
-                        scope_schema,
-                        lambdas,
-                        diagnostics,
-                    );
-                    continue;
                 }
-                let resolved_scope = resolve_schema_path(scope_schema, name);
-                if resolved_scope.is_none() {
-                    validate_schema_path(
-                        source,
-                        source_name,
-                        scope_schema,
-                        name,
-                        span,
-                        diagnostics,
-                    );
-                } else if !supports_section_scope(resolved_scope) {
-                    diagnostics.push(source_diagnostic(
-                        IssueKind::UnexpectedSchemaType,
-                        source,
-                        source_name,
-                        span,
-                        format!("schema path `{name}` is not valid as a section"),
-                    ));
-                }
-                validate_nodes(
-                    source,
-                    source_name,
+                Node::LambdaSection {
+                    name,
+                    span,
                     children,
-                    section_scope(resolved_scope.or(scope_schema)),
-                    lambdas,
-                    diagnostics,
-                );
-            }
-            Node::InvertedSection {
-                name,
-                span,
-                children,
-            } => {
-                if lambdas.contains_key(name) {
-                    diagnostics.push(source_diagnostic(
-                        IssueKind::InvalidLambdaUsage,
-                        source,
-                        source_name,
-                        span,
-                        format!("inverted lambda section `{name}` is unsupported"),
-                    ));
-                } else {
-                    validate_schema_path(
-                        source,
-                        source_name,
-                        scope_schema,
-                        name,
-                        span,
-                        diagnostics,
-                    );
+                } => {
+                    if !self.lambdas.contains_key(name) {
+                        self.diagnostics.push(source_diagnostic(
+                            IssueKind::InvalidLambdaUsage,
+                            source,
+                            source_name,
+                            span,
+                            format!("lambda `{name}` is not defined"),
+                        ));
+                    }
+                    self.validate_nodes(source, source_name, children);
                 }
-                validate_nodes(
-                    source,
-                    source_name,
-                    children,
-                    scope_schema,
-                    lambdas,
-                    diagnostics,
-                );
-            }
-            Node::LambdaVariable { name, span } => {
-                if !lambdas.contains_key(name) {
-                    diagnostics.push(source_diagnostic(
-                        IssueKind::InvalidLambdaUsage,
-                        source,
-                        source_name,
-                        span,
-                        format!("lambda `{name}` is not defined"),
-                    ));
+                Node::Parent { children, .. } | Node::Block { children, .. } => {
+                    self.validate_nodes(source, source_name, children);
                 }
-            }
-            Node::LambdaSection {
-                name,
-                span,
-                children,
-            } => {
-                if !lambdas.contains_key(name) {
-                    diagnostics.push(source_diagnostic(
-                        IssueKind::InvalidLambdaUsage,
-                        source,
-                        source_name,
-                        span,
-                        format!("lambda `{name}` is not defined"),
-                    ));
+                Node::ResolvedPartial { template_id, .. } => {
+                    if !self.in_progress_template_units.insert(*template_id) {
+                        continue;
+                    }
+                    let Some(unit) = self.template_units.get(*template_id) else {
+                        self.diagnostics.push(source_diagnostic(
+                            IssueKind::UnresolvedPartial,
+                            source,
+                            source_name,
+                            &(0..0),
+                            format!(
+                                "resolved partial references missing template unit `{template_id}`"
+                            ),
+                        ));
+                        self.in_progress_template_units.remove(template_id);
+                        continue;
+                    };
+                    self.validate_nodes(&unit.raw_data, &unit.source.name, &unit.nodes);
+                    self.in_progress_template_units.remove(template_id);
                 }
-                validate_nodes(
-                    source,
-                    source_name,
-                    children,
-                    scope_schema,
-                    lambdas,
-                    diagnostics,
-                );
+                Node::Text { .. }
+                | Node::Comment { .. }
+                | Node::Partial { .. }
+                | Node::DynamicPartial { .. }
+                | Node::DelimiterChange { .. } => {}
             }
-            Node::Parent { children, .. } | Node::Block { children, .. } => {
-                validate_nodes(
-                    source,
-                    source_name,
-                    children,
-                    scope_schema,
-                    lambdas,
-                    diagnostics,
-                );
-            }
-            Node::Text { .. }
-            | Node::Comment { .. }
-            | Node::Partial { .. }
-            | Node::DynamicPartial { .. }
-            | Node::DelimiterChange { .. } => {}
         }
     }
-}
 
-fn validate_schema_path(
-    source: &str,
-    source_name: &str,
-    schema: Option<&serde_json::Value>,
-    name: &str,
-    span: &std::ops::Range<usize>,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let Some(schema) = schema else {
-        return;
-    };
-    if name == "." || resolve_schema_path(Some(schema), name).is_some() {
-        return;
+    fn validate_variable(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        name: &str,
+        span: &std::ops::Range<usize>,
+    ) {
+        if let Some(lambda) = self.lambdas.get(name) {
+            if lambda.usage != LambdaUsage::Variable {
+                self.diagnostics.push(source_diagnostic(
+                    IssueKind::InvalidLambdaUsage,
+                    source,
+                    source_name,
+                    span,
+                    format!("lambda `{name}` is not valid as a variable"),
+                ));
+            }
+            return;
+        }
+        self.validate_schema_path(source, source_name, name, span);
     }
-    diagnostics.push(source_diagnostic(
-        IssueKind::MissingSchemaPath,
-        source,
-        source_name,
-        span,
-        format!("missing schema path `{name}`"),
-    ));
+
+    fn validate_section(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        name: &str,
+        span: &std::ops::Range<usize>,
+        children: &[Node],
+    ) {
+        if let Some(lambda) = self.lambdas.get(name) {
+            if lambda.usage != LambdaUsage::Section {
+                self.diagnostics.push(source_diagnostic(
+                    IssueKind::InvalidLambdaUsage,
+                    source,
+                    source_name,
+                    span,
+                    format!("lambda `{name}` is not valid as a section"),
+                ));
+            }
+            self.validate_nodes(source, source_name, children);
+            return;
+        }
+
+        let resolved_scope = resolve_schema_path(self.scope_schema, name);
+        if resolved_scope.is_none() {
+            self.validate_schema_path(source, source_name, name, span);
+        } else if !supports_section_scope(resolved_scope) {
+            self.diagnostics.push(source_diagnostic(
+                IssueKind::UnexpectedSchemaType,
+                source,
+                source_name,
+                span,
+                format!("schema path `{name}` is not valid as a section"),
+            ));
+        }
+
+        let previous_scope = self.scope_schema;
+        self.scope_schema = section_scope(resolved_scope.or(self.scope_schema));
+        self.validate_nodes(source, source_name, children);
+        self.scope_schema = previous_scope;
+    }
+
+    fn validate_schema_path(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        name: &str,
+        span: &std::ops::Range<usize>,
+    ) {
+        let Some(schema) = self.scope_schema else {
+            return;
+        };
+        if name == "." || resolve_schema_path(Some(schema), name).is_some() {
+            return;
+        }
+        self.diagnostics.push(source_diagnostic(
+            IssueKind::MissingSchemaPath,
+            source,
+            source_name,
+            span,
+            format!("missing schema path `{name}`"),
+        ));
+    }
 }
 
 fn resolve_schema_path<'a>(

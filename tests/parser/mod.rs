@@ -38,7 +38,7 @@ fn write_file(root: &Path, relative: &str, source: &str) {
 
 #[test]
 fn parses_core_nodes_with_source_spans() {
-    let result = parse_template("hello {{name}} {{{raw}}} {{& other}} {{! note }} {{> header}}");
+    let result = parse_template("hello {{name}} {{{raw}}} {{& other}} {{! note }}");
 
     assert!(result.state.diagnostics.is_empty());
     assert_eq!(
@@ -52,8 +52,6 @@ fn parses_core_nodes_with_source_spans() {
             Node::unescaped_variable("other", 25..36),
             Node::text(" ", 36..37),
             Node::comment("note", 37..48),
-            Node::text(" ", 48..49),
-            Node::partial("header", 49..61),
         ]
     );
 }
@@ -185,13 +183,14 @@ fn exposes_feedback_event_metadata() {
 }
 
 #[test]
-fn parses_one_level_of_configured_partials() {
+fn parses_configured_partials_into_graph_units() {
     let root = temp_template_root();
     write_file(
         &root,
         "partials/header.mustache",
         "Header {{title}} {{> nested}}",
     );
+    write_file(&root, "partials/nested.mustache", "Nested");
 
     let mut input = ParserInput::new(
         SourceMetadata::new("pages/index.mustache").with_root(root.clone()),
@@ -209,23 +208,121 @@ fn parses_one_level_of_configured_partials() {
     let result = parse(input);
 
     assert!(result.state.diagnostics.is_empty());
-    assert_eq!(result.state.partials.len(), 1);
-    assert_eq!(result.state.partials[0].name, "header");
+    assert_eq!(result.ast.template_units.len(), 2);
+    assert_eq!(result.ast.template_units[0].name, "header");
+    assert_eq!(result.ast.template_units[1].name, "nested");
+}
+
+#[test]
+fn resolves_static_partials_into_ast_graph() {
+    let root = temp_template_root();
+    write_file(&root, "partials/header.mustache", "Header {{title}}");
+
+    let mut input = ParserInput::new(
+        SourceMetadata::new("pages/index.mustache").with_root(root.clone()),
+        "Start {{> header}}",
+    );
+    input.partials.push(PartialMapping::new(
+        "header",
+        PathBuf::from("partials/header.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(result.ast.template_units.len(), 1);
+    assert_eq!(result.ast.template_units[0].name, "header");
     assert_eq!(
-        result.state.partials[0].path,
+        result.ast.template_units[0].path,
         root.join("partials/header.mustache")
     );
     assert_eq!(
-        result.state.partials[0].ast.nodes,
+        result.ast.template_units[0].nodes,
         vec![
             Node::text("Header ", 0..7),
             Node::escaped_variable("title", 7..16),
-            Node::text(" ", 16..17),
-            Node::partial("nested", 17..29),
         ]
     );
-    assert_eq!(result.state.nested_partials.len(), 1);
-    assert_eq!(result.state.nested_partials[0].name, "nested");
+    assert_eq!(
+        result.ast.nodes,
+        vec![
+            Node::text("Start ", 0..6),
+            Node::resolved_partial(
+                "header",
+                6..18,
+                root.join("partials/header.mustache"),
+                0,
+                false,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn resolves_nested_partials_into_ast_graph() {
+    let root = temp_template_root();
+    write_file(&root, "partials/header.mustache", "Header {{> nested}}");
+    write_file(&root, "partials/nested.mustache", "Nested {{title}}");
+
+    let mut input = ParserInput::new(
+        SourceMetadata::new("pages/index.mustache").with_root(root.clone()),
+        "{{> header}}",
+    );
+    input.partials.push(PartialMapping::new(
+        "header",
+        PathBuf::from("partials/header.mustache"),
+    ));
+    input.partials.push(PartialMapping::new(
+        "nested",
+        PathBuf::from("partials/nested.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(result.ast.template_units.len(), 2);
+    assert_eq!(result.ast.template_units[0].name, "header");
+    assert_eq!(result.ast.template_units[1].name, "nested");
+    assert_eq!(
+        result.ast.template_units[0].nodes,
+        vec![
+            Node::text("Header ", 0..7),
+            Node::resolved_partial(
+                "nested",
+                7..19,
+                root.join("partials/nested.mustache"),
+                1,
+                false,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn preserves_recursive_partial_reference_without_error() {
+    let root = temp_template_root();
+    write_file(&root, "partials/self.mustache", "Self {{> self}}");
+
+    let mut input = ParserInput::new(
+        SourceMetadata::new("pages/index.mustache").with_root(root.clone()),
+        "{{> self}}",
+    );
+    input.partials.push(PartialMapping::new(
+        "self",
+        PathBuf::from("partials/self.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(result.ast.template_units.len(), 1);
+    assert_eq!(
+        result.ast.template_units[0].nodes,
+        vec![
+            Node::text("Self ", 0..5),
+            Node::resolved_partial("self", 5..15, root.join("partials/self.mustache"), 0, true,),
+        ]
+    );
 }
 
 #[test]
@@ -241,11 +338,139 @@ fn reports_unresolved_partials() {
     assert_eq!(result.state.diagnostics.len(), 1);
     assert_eq!(
         result.state.diagnostics[0].severity,
-        DiagnosticSeverity::Warning
+        DiagnosticSeverity::Error
     );
     assert_eq!(
         result.state.diagnostics[0].issue,
         IssueKind::UnresolvedPartial
+    );
+}
+
+#[test]
+fn routes_unresolved_partial_errors_to_feedback_handlers() {
+    let diagnostics = Rc::new(RefCell::new(Vec::<Diagnostic>::new()));
+    let received = Rc::clone(&diagnostics);
+    let mut input = ParserInput::new(SourceMetadata::new("template.mustache"), "{{> missing}}");
+    input.feedback.on_error = Some(Box::new(move |event| {
+        received.borrow_mut().push(event.diagnostic.clone());
+    }));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(diagnostics.borrow().len(), 1);
+    assert_eq!(diagnostics.borrow()[0].issue, IssueKind::UnresolvedPartial);
+}
+
+#[test]
+fn reports_unreadable_mapped_partials_as_errors() {
+    let root = temp_template_root();
+    let mut input = ParserInput::new(
+        SourceMetadata::new("pages/index.mustache").with_root(root),
+        "{{> missing}}",
+    );
+    input.partials.push(PartialMapping::new(
+        "missing",
+        PathBuf::from("partials/missing.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].severity,
+        DiagnosticSeverity::Error
+    );
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::UnresolvedPartial
+    );
+}
+
+#[test]
+fn skips_frontmatter_in_resolved_partials_and_preserves_body_line() {
+    let root = temp_template_root();
+    write_file(
+        &root,
+        "partials/header.mustache",
+        "---\ntitle: Partial\n---\n{{#title}}",
+    );
+
+    let mut input = ParserInput::new(
+        SourceMetadata::new("pages/index.mustache").with_root(root.clone()),
+        "{{> header}}",
+    );
+    input.partials.push(PartialMapping::new(
+        "header",
+        PathBuf::from("partials/header.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert_eq!(result.ast.template_units.len(), 1);
+    assert_eq!(result.ast.template_units[0].source.body_offset, 23);
+    assert_eq!(result.ast.template_units[0].source.body_start_line, 4);
+    assert_eq!(
+        result.ast.template_units[0].nodes,
+        vec![Node::section("title", 23..33, vec![])]
+    );
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::UnclosedSection
+    );
+    assert_eq!(
+        result.state.diagnostics[0].source_name,
+        root.join("partials/header.mustache").display().to_string()
+    );
+    assert_eq!(result.state.diagnostics[0].location.line, 4);
+    assert!(result.state.recovered);
+}
+
+#[test]
+fn dynamic_partials_remain_runtime_references_without_static_resolution_error() {
+    let result = parse_template("{{>* runtime_partial}}");
+
+    assert!(result.state.diagnostics.is_empty());
+    assert_eq!(
+        result.ast.nodes,
+        vec![Node::dynamic_partial("runtime_partial", 0..22)]
+    );
+}
+
+#[test]
+fn sections_do_not_balance_across_partial_boundaries() {
+    let root = temp_template_root();
+    write_file(&root, "partials/close.mustache", "{{/items}}");
+
+    let mut input = ParserInput::new(
+        SourceMetadata::new("pages/index.mustache").with_root(root.clone()),
+        "{{#items}}{{> close}}",
+    );
+    input.partials.push(PartialMapping::new(
+        "close",
+        PathBuf::from("partials/close.mustache"),
+    ));
+
+    let result = parse(input);
+
+    assert_eq!(
+        result
+            .state
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.issue == IssueKind::UnclosedSection)
+            .count(),
+        1
+    );
+    assert_eq!(
+        result
+            .state
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.issue == IssueKind::UnmatchedClosingTag)
+            .count(),
+        1
     );
 }
 

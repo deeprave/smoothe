@@ -190,6 +190,38 @@ fn check_command_warns_for_unknown_schema_variable() {
 }
 
 #[test]
+fn check_command_validates_variables_inside_frontmatter_included_partials() {
+    let dir = temp_dir();
+    let partials = dir.join("_partials");
+    fs::create_dir(&partials).expect("create partials dir");
+    fs::write(partials.join("_profile.mustache"), "Profile {{user.email}}").expect("write partial");
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "---\nincludes:\n  - _partials/profile.mustache\n---\nHello {{> profile}}",
+    );
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","properties":{"user":{"type":"object","properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("MissingSchemaPath"));
+    assert!(stderr.contains("user.email"));
+    assert!(stderr.contains("_profile.mustache"));
+}
+
+#[test]
 fn check_command_warns_for_invalid_schema_input() {
     let dir = temp_dir();
     let template = write_template(&dir, "template.mustache", "Hello {{name}}");
@@ -487,6 +519,66 @@ fn parse_command_json_flag_prints_valid_json() {
 }
 
 #[test]
+fn parse_command_outputs_resolved_frontmatter_included_partials() {
+    let dir = temp_dir();
+    let partials = dir.join("_partials");
+    fs::create_dir(&partials).expect("create partials dir");
+    fs::write(partials.join("_header.mustache"), "Header {{title}}").expect("write partial");
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "---\nincludes:\n  - _partials/header.mustache\n---\n{{> header}}",
+    );
+
+    let compact = smoothe()
+        .arg("parse")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let compact_stdout = stdout(&compact);
+
+    assert!(compact.status.success());
+    assert!(compact_stdout.contains("resolved_partial name=\"header\""));
+    assert!(compact_stdout.contains("template_unit id=0 name=\"header\""));
+    assert!(compact_stdout.contains("escaped_variable name=\"title\""));
+
+    let json_output = smoothe()
+        .arg("parse")
+        .arg("--json")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&json_output);
+
+    assert!(json_output.status.success());
+    assert_eq!(
+        json["inputs"][0]["ast"]["nodes"][0]["kind"],
+        "resolved_partial"
+    );
+    assert_eq!(json["inputs"][0]["ast"]["nodes"][0]["name"], "header");
+    assert_eq!(
+        json["inputs"][0]["ast"]["template_units"][0]["name"],
+        "header"
+    );
+    assert_eq!(
+        json["inputs"][0]["ast"]["template_units"][0]["nodes"][1]["name"],
+        "title"
+    );
+}
+
+#[test]
+fn parse_and_check_fail_for_unresolved_static_partials() {
+    for command in ["parse", "check"] {
+        let output = smoothe_with_stdin(&[command, "-"], "{{> missing}}");
+        let stderr = stderr(&output);
+
+        assert!(!output.status.success(), "{command} should fail");
+        assert!(stderr.contains("error"));
+        assert!(stderr.contains("UnresolvedPartial"));
+    }
+}
+
+#[test]
 fn parse_command_short_json_flag_prints_json() {
     let output = smoothe_with_stdin(&["parse", "-j", "-"], "Hello {{name}}");
     let json = json_stdout(&output);
@@ -597,13 +689,11 @@ fn parse_command_json_projects_reachable_node_kinds() {
             },
         },
         JsonProjectionCase {
-            name: "comment and partial",
-            source: "{{! note }}{{> header}}",
+            name: "comment",
+            source: "{{! note }}",
             assert_json: |nodes| {
                 assert_eq!(nodes[0]["kind"], "comment");
                 assert_eq!(nodes[0]["text"], "note");
-                assert_eq!(nodes[1]["kind"], "partial");
-                assert_eq!(nodes[1]["name"], "header");
             },
         },
         JsonProjectionCase {
@@ -690,12 +780,9 @@ fn parse_command_compact_output_projects_reachable_node_kinds() {
             ],
         },
         CompactProjectionCase {
-            name: "comment and partial",
-            source: "{{! note }}{{> header}}",
-            expected_fragments: &[
-                "comment text=\"note\" span=",
-                "partial name=\"header\" span=",
-            ],
+            name: "comment",
+            source: "{{! note }}",
+            expected_fragments: &["comment text=\"note\" span="],
         },
         CompactProjectionCase {
             name: "inverted section",
