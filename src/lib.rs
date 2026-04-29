@@ -1,3 +1,4 @@
+pub mod check_events;
 pub mod config;
 pub mod content;
 pub mod context_schema;

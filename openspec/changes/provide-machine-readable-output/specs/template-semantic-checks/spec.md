@@ -1,30 +1,30 @@
 ## ADDED Requirements
 
-### Requirement: Formatter-Independent Check Diagnostics
+### Requirement: Listener-Independent Check Diagnostics
 
 The system SHALL emit semantic check diagnostics independently of the selected
-output format.
+output listener.
 
-#### Scenario: Semantic diagnostics are collected before formatting
+#### Scenario: Semantic diagnostics are emitted as events
 
 - **WHEN** schema, lambda, content, parser, or partial validation emits
   diagnostics during check
-- **THEN** the check command collects those diagnostics before invoking the
-  selected output formatter.
+- **THEN** the check command publishes diagnostic events without requiring the
+  entire check run to complete first.
 
 #### Scenario: Semantic validation does not write output directly
 
 - **WHEN** semantic validation emits a diagnostic
-- **THEN** it returns structured diagnostic data rather than writing directly to
-  stdout or stderr.
+- **THEN** it emits or returns structured diagnostic data that is published as a
+  check event rather than writing directly to stdout or stderr.
 
 #### Scenario: Format selection does not change validation
 
 - **WHEN** the same input is checked using compiler-style output and JSON output
-- **THEN** the same unfiltered diagnostics are produced before formatting.
+- **THEN** the same unfiltered diagnostic events are produced.
 
-#### Scenario: Severity filtering is applied after validation
+#### Scenario: Verbosity filtering is applied by listeners
 
-- **WHEN** a diagnostic level filter is selected
-- **THEN** semantic validation still produces the full diagnostic set and the
-  formatter applies the display filter afterward.
+- **WHEN** a verbosity filter is selected
+- **THEN** semantic validation still produces the full diagnostic event stream
+  and the output listener applies the display filter afterward.

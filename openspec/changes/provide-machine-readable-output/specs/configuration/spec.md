@@ -22,24 +22,24 @@ The system SHALL allow check output format defaults to be configured in the
   `smoothe check --format compiler template.mustache`
 - **THEN** the check command uses compiler-style output.
 
-### Requirement: Check Diagnostic Level Configuration
+### Requirement: Check Verbosity Configuration
 
-The system SHALL allow check diagnostic display level defaults to be configured
+The system SHALL allow check event display verbosity defaults to be configured
 in the `[check]` configuration section.
 
-#### Scenario: Config selects diagnostic level
+#### Scenario: Config selects verbosity
 
-- **WHEN** `[check] diagnostic_level = "info"` is configured
-- **THEN** the check command displays diagnostics at info level and above unless
+- **WHEN** `[check] verbosity = "info"` is configured
+- **THEN** the check command displays events at info verbosity and above unless
   overridden by the CLI.
 
-#### Scenario: CLI diagnostic level overrides config
+#### Scenario: CLI verbosity overrides config
 
-- **WHEN** `[check] diagnostic_level = "debug"` is configured and the user runs
-  `smoothe check --diagnostic-level error template.mustache`
-- **THEN** the check command displays only error diagnostics.
+- **WHEN** `[check] verbosity = "debug"` is configured and the user runs
+  `smoothe check --verbosity error template.mustache`
+- **THEN** the check command displays only error events.
 
-#### Scenario: Invalid configured diagnostic level fails config load
+#### Scenario: Invalid configured verbosity fails config load
 
-- **WHEN** `[check] diagnostic_level` contains an unsupported value
+- **WHEN** `[check] verbosity` contains an unsupported value
 - **THEN** configuration loading reports a configuration error.

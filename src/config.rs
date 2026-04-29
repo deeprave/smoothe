@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use clap::ColorChoice;
+use clap::{ColorChoice, ValueEnum};
 use serde::Deserialize;
 
 const CONFIG_FILE_NAME: &str = "smoothe.toml";
@@ -27,6 +27,8 @@ struct GlobalConfig {
 pub struct CheckConfig {
     schema: Option<String>,
     lambdas: Option<String>,
+    output: Option<CheckOutputFormat>,
+    verbosity: Option<CheckVerbosity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,8 @@ pub struct ResolvedGlobalOptions {
 pub struct ResolvedCheckOptions {
     pub schema: SemanticInput,
     pub lambdas: SemanticInput,
+    pub output: CheckOutputFormat,
+    pub verbosity: CheckVerbosity,
 }
 
 impl Default for ResolvedCheckOptions {
@@ -45,8 +49,29 @@ impl Default for ResolvedCheckOptions {
         Self {
             schema: SemanticInput::Disabled,
             lambdas: SemanticInput::Disabled,
+            output: CheckOutputFormat::Compiler,
+            verbosity: CheckVerbosity::Warning,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum CheckOutputFormat {
+    Compiler,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub enum CheckVerbosity {
+    Error,
+    Warning,
+    Info,
+    Debug,
+    Trace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +145,8 @@ impl Configuration {
         ResolvedCheckOptions {
             schema: self.resolve_semantic_input(self.check.schema.as_deref()),
             lambdas: self.resolve_semantic_input(self.check.lambdas.as_deref()),
+            output: self.check.output.unwrap_or(CheckOutputFormat::Compiler),
+            verbosity: self.check.verbosity.unwrap_or(CheckVerbosity::Warning),
         }
     }
 

@@ -1,11 +1,18 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
 };
 
-use smoothe::config::{ResolvedCheckOptions, ResolvedGlobalOptions, SemanticInput};
+use serde::Serialize;
+use smoothe::check_events::{
+    CheckEvent, CheckEventBus, CheckEventLevel, CheckEventListener, PartialEvent, ProgressEvent,
+};
+use smoothe::config::{
+    CheckOutputFormat, CheckVerbosity, ResolvedCheckOptions, ResolvedGlobalOptions, SemanticInput,
+};
 use smoothe::content::{ContentInput, process as process_template};
 use smoothe::context_schema::{ContextSchema, ContextShape, PathResolution, SectionScope};
 use smoothe::lambda::{LambdaSideEffects, LambdaSpec, LambdaUsage};
@@ -21,9 +28,11 @@ use super::read_template_inputs;
 pub fn check(
     args: CheckArgs,
     global_options: ResolvedGlobalOptions,
-    _check_options: ResolvedCheckOptions,
+    check_options: ResolvedCheckOptions,
 ) -> ExitCode {
     let _color = global_options.color;
+    let output_options = CheckOutputOptions::resolve(&args, &check_options);
+    let mut events = output_options.event_bus();
 
     let inputs = match read_template_inputs(&args.inputs) {
         Ok(inputs) => inputs,
@@ -33,50 +42,133 @@ pub fn check(
         }
     };
 
-    let semantic_inputs = SemanticInputs::resolve(&args, &_check_options);
+    let semantic_inputs = SemanticInputs::resolve(&args, &check_options);
     let (schema, schema_diagnostics) = load_schema(&semantic_inputs.schema);
     let (lambdas, lambda_diagnostics) = load_lambdas(&semantic_inputs.lambdas);
     let mut has_error = false;
 
-    for diagnostic in schema_diagnostics.iter().chain(lambda_diagnostics.iter()) {
-        eprintln!("{}", format_diagnostic(diagnostic));
-    }
+    let _ = events.emit(CheckEvent::run_started(inputs.len()));
+    has_error |= emit_diagnostics(&mut events, schema_diagnostics);
+    has_error |= emit_diagnostics(&mut events, lambda_diagnostics);
 
-    for input in inputs {
-        let mut source = SourceMetadata::new(&input.name);
+    for mut input in inputs {
+        let source_name = std::mem::take(&mut input.name);
+        let _ = events.emit(CheckEvent::InputStarted {
+            source_name: source_name.clone(),
+        });
+        let _ = events.emit(CheckEvent::progress(
+            CheckEventLevel::Trace,
+            ProgressEvent::new(format!("check-input {source_name}")),
+        ));
+        let mut source = SourceMetadata::new(&source_name);
         if let Some(root) = input.root {
             source = source.with_root(root);
         }
         let mut content_input = ContentInput::new(source, &input.source);
         content_input.lambdas = lambdas.values().cloned().collect();
         let result = process_template(content_input);
+        let mut input_has_error = false;
 
-        for diagnostic in &result.state.diagnostics {
-            eprintln!("{}", format_diagnostic(diagnostic));
-        }
-        let semantic_diagnostics = validate_semantics(
+        input_has_error |= emit_diagnostics(&mut events, result.state.diagnostics);
+        input_has_error |= validate_semantics_with_events(
             &result.raw_data,
-            &input.name,
+            &source_name,
             &result.ast,
             schema.as_ref(),
             &lambdas,
+            &mut events,
         );
-        for diagnostic in &semantic_diagnostics {
-            eprintln!("{}", format_diagnostic(diagnostic));
-        }
 
-        has_error |= result
-            .state
-            .diagnostics
-            .iter()
-            .chain(semantic_diagnostics.iter())
-            .any(|diagnostic| diagnostic.severity == DiagnosticSeverity::Error);
+        has_error |= input_has_error;
+        let _ = events.emit(CheckEvent::InputFinished {
+            source_name,
+            has_error: input_has_error,
+        });
+    }
+    if let Err(error) = events.emit(CheckEvent::run_finished(has_error)) {
+        eprintln!("error: check output listener failed; output may be incomplete: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    if let Some(error) = events.failure() {
+        // Listener failures are output/runtime failures independent of
+        // validation diagnostics. Diagnostics may already have been emitted;
+        // the command still fails so automation can detect incomplete output.
+        eprintln!("error: check output listener failed; output may be incomplete: {error}");
+        return ExitCode::FAILURE;
     }
 
     if has_error {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn emit_diagnostics(
+    events: &mut CheckEventBus,
+    diagnostics: impl IntoIterator<Item = Diagnostic>,
+) -> bool {
+    let mut has_error = false;
+    for diagnostic in diagnostics {
+        has_error |= diagnostic.severity == DiagnosticSeverity::Error;
+        let _ = events.emit(CheckEvent::diagnostic(diagnostic));
+    }
+    has_error
+}
+
+struct CheckOutputOptions {
+    output: CheckOutputFormat,
+    verbosity: CheckVerbosity,
+}
+
+impl CheckOutputOptions {
+    fn resolve(args: &CheckArgs, options: &ResolvedCheckOptions) -> Self {
+        Self {
+            output: resolve_check_output_format(args, options),
+            verbosity: args.verbosity.unwrap_or(options.verbosity),
+        }
+    }
+
+    fn event_bus(&self) -> CheckEventBus {
+        let mut bus = CheckEventBus::new();
+        match self.output {
+            CheckOutputFormat::Compiler => {
+                bus.add_listener(CompilerListener::new(verbosity_level(self.verbosity)));
+            }
+            CheckOutputFormat::Json => {
+                bus.add_listener(JsonListener::new(verbosity_level(self.verbosity)));
+            }
+        }
+        bus
+    }
+}
+
+fn resolve_check_output_format(
+    args: &CheckArgs,
+    options: &ResolvedCheckOptions,
+) -> CheckOutputFormat {
+    // Precedence is intentionally explicit: --format is the exact selector,
+    // --json/--no-json only change the configured default.
+    if let Some(format) = args.format {
+        return format;
+    }
+    if args.json {
+        return CheckOutputFormat::Json;
+    }
+    if args.no_json {
+        return CheckOutputFormat::Compiler;
+    }
+    options.output
+}
+
+fn verbosity_level(value: CheckVerbosity) -> CheckEventLevel {
+    match value {
+        CheckVerbosity::Error => CheckEventLevel::Error,
+        CheckVerbosity::Warning => CheckEventLevel::Warning,
+        CheckVerbosity::Info => CheckEventLevel::Info,
+        CheckVerbosity::Debug => CheckEventLevel::Debug,
+        CheckVerbosity::Trace => CheckEventLevel::Trace,
     }
 }
 
@@ -333,33 +425,383 @@ fn input_diagnostic(issue: IssueKind, path: &Path, message: String) -> Diagnosti
     )
 }
 
-fn validate_semantics(
+struct CompilerListener {
+    verbosity: CheckEventLevel,
+}
+
+impl CompilerListener {
+    fn new(verbosity: CheckEventLevel) -> Self {
+        Self { verbosity }
+    }
+}
+
+impl CheckEventListener for CompilerListener {
+    fn on_event(&mut self, event: &CheckEvent) -> Result<(), String> {
+        if !event.level().visible_at(self.verbosity) {
+            return Ok(());
+        }
+        match event {
+            CheckEvent::Diagnostic(event) => {
+                eprintln!("{}", format_compiler_diagnostic(&event.diagnostic));
+            }
+            CheckEvent::PartialStarted(event) => {
+                eprintln!("{}", format_partial_event("partial-started", event));
+            }
+            CheckEvent::PartialFinished(event) => {
+                eprintln!("{}", format_partial_event("partial-finished", event));
+            }
+            CheckEvent::PartialSkipped(event) => {
+                eprintln!("{}", format_partial_event("partial-skipped", event));
+            }
+            CheckEvent::Progress(event) | CheckEvent::Trace(event) => {
+                eprintln!("{}: {}", event.level.as_str(), event.message);
+            }
+            CheckEvent::RunStarted { .. }
+            | CheckEvent::InputStarted { .. }
+            | CheckEvent::InputFinished { .. }
+            | CheckEvent::RunFinished { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+fn format_partial_event(kind: &str, event: &PartialEvent) -> String {
+    let path = event
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<unresolved>".to_owned());
+    format!(
+        "partial: {}: {kind}: {} {path}",
+        event.level.as_str(),
+        event.name
+    )
+}
+
+fn format_compiler_diagnostic(diagnostic: &Diagnostic) -> String {
+    let mut output = format!(
+        "{}:{}:{}: {}: {}: {}",
+        diagnostic.source_name,
+        diagnostic.location.line,
+        diagnostic.location.column,
+        severity_label(diagnostic.severity),
+        diagnostic.issue.as_str(),
+        diagnostic.message
+    );
+    append_diagnostic_details(&mut output, diagnostic);
+    output
+}
+
+struct JsonListener {
+    verbosity: CheckEventLevel,
+    diagnostics: JsonDiagnosticGroups,
+    events: Vec<JsonCheckEvent>,
+    inputs: Vec<JsonCheckInput>,
+    current_input: Option<JsonCheckInput>,
+    finished: bool,
+    writer: Box<dyn Write>,
+}
+
+impl JsonListener {
+    fn new(verbosity: CheckEventLevel) -> Self {
+        Self::with_writer(std::io::stdout(), verbosity)
+    }
+
+    fn with_writer(writer: impl Write + 'static, verbosity: CheckEventLevel) -> Self {
+        Self {
+            verbosity,
+            diagnostics: JsonDiagnosticGroups::default(),
+            events: Vec::new(),
+            inputs: Vec::new(),
+            current_input: None,
+            finished: false,
+            writer: Box::new(writer),
+        }
+    }
+
+    fn current_input_mut(&mut self) -> Option<&mut JsonCheckInput> {
+        self.current_input.as_mut()
+    }
+}
+
+impl CheckEventListener for JsonListener {
+    fn on_event(&mut self, event: &CheckEvent) -> Result<(), String> {
+        // A JSON listener is single-use. This also prevents a second
+        // RunFinished event from serializing an empty document.
+        if self.finished {
+            return Err("JSON check listener received an event after run-finished".to_owned());
+        }
+        match event {
+            CheckEvent::InputStarted { source_name } => {
+                if self.current_input.is_some() {
+                    return Err("JSON check listener received input-started before finishing the previous input".to_owned());
+                }
+                self.current_input = Some(JsonCheckInput::new(source_name.clone()));
+            }
+            CheckEvent::InputFinished { has_error, .. } => {
+                let Some(mut input) = self.current_input.take() else {
+                    return Err(
+                        "JSON check listener received input-finished without input-started"
+                            .to_owned(),
+                    );
+                };
+                input.has_error = *has_error;
+                self.inputs.push(input);
+            }
+            CheckEvent::Diagnostic(event) => {
+                if !event.level.visible_at(self.verbosity) {
+                    return Ok(());
+                }
+                let diagnostic = JsonCheckDiagnostic::from(&event.diagnostic, event.level);
+                if let Some(input) = self.current_input_mut() {
+                    input
+                        .diagnostics
+                        .add_diagnostic(event.diagnostic.severity, diagnostic);
+                } else {
+                    self.diagnostics
+                        .add_diagnostic(event.diagnostic.severity, diagnostic);
+                }
+            }
+            CheckEvent::PartialStarted(event) => self.push_event(event.level, || {
+                JsonCheckEvent::partial("partial-started", event)
+            }),
+            CheckEvent::PartialFinished(event) => {
+                self.push_event(event.level, || {
+                    JsonCheckEvent::partial("partial-finished", event)
+                });
+            }
+            CheckEvent::PartialSkipped(event) => self.push_event(event.level, || {
+                JsonCheckEvent::partial("partial-skipped", event)
+            }),
+            CheckEvent::Progress(event) => self.push_event(event.level, || {
+                JsonCheckEvent::message("progress", event.level, event.message.clone())
+            }),
+            CheckEvent::Trace(event) => self.push_event(event.level, || {
+                JsonCheckEvent::message("trace", event.level, event.message.clone())
+            }),
+            CheckEvent::RunFinished { has_error } => {
+                if self.current_input.is_some() {
+                    return Err(
+                        "JSON check listener received run-finished while an input was still in progress"
+                            .to_owned(),
+                    );
+                }
+                self.finished = true;
+                let output = JsonCheckOutput {
+                    has_error: *has_error,
+                    diagnostics: std::mem::take(&mut self.diagnostics),
+                    events: std::mem::take(&mut self.events),
+                    inputs: std::mem::take(&mut self.inputs),
+                };
+                serde_json::to_writer_pretty(&mut self.writer, &output)
+                    .map_err(|error| format!("failed to serialize JSON output: {error}"))?;
+                writeln!(&mut self.writer)
+                    .map_err(|error| format!("failed to write JSON output: {error}"))?;
+            }
+            CheckEvent::RunStarted { .. } => {}
+        }
+        Ok(())
+    }
+}
+
+impl JsonListener {
+    fn push_event(&mut self, level: CheckEventLevel, build: impl FnOnce() -> JsonCheckEvent) {
+        if !level.visible_at(self.verbosity) {
+            return;
+        }
+        if let Some(input) = self.current_input_mut() {
+            input.events.push(build());
+        } else {
+            self.events.push(build());
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonCheckOutput {
+    has_error: bool,
+    #[serde(flatten)]
+    diagnostics: JsonDiagnosticGroups,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events: Vec<JsonCheckEvent>,
+    inputs: Vec<JsonCheckInput>,
+}
+
+#[derive(Serialize)]
+struct JsonCheckInput {
+    source: String,
+    has_error: bool,
+    #[serde(flatten)]
+    diagnostics: JsonDiagnosticGroups,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events: Vec<JsonCheckEvent>,
+}
+
+impl JsonCheckInput {
+    fn new(source: String) -> Self {
+        Self {
+            source,
+            has_error: false,
+            diagnostics: JsonDiagnosticGroups::default(),
+            events: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default, Serialize)]
+struct JsonDiagnosticGroups {
+    errors: Vec<JsonCheckDiagnostic>,
+    warnings: Vec<JsonCheckDiagnostic>,
+    info: Vec<JsonCheckDiagnostic>,
+    debug: Vec<JsonCheckDiagnostic>,
+}
+
+impl JsonDiagnosticGroups {
+    fn add_diagnostic(&mut self, severity: DiagnosticSeverity, diagnostic: JsonCheckDiagnostic) {
+        match severity {
+            DiagnosticSeverity::Error => self.errors.push(diagnostic),
+            DiagnosticSeverity::Warning => self.warnings.push(diagnostic),
+            DiagnosticSeverity::Info => self.info.push(diagnostic),
+            DiagnosticSeverity::Debug => self.debug.push(diagnostic),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonCheckDiagnostic {
+    level: String,
+    severity: String,
+    issue: String,
+    source: String,
+    line: usize,
+    column: usize,
+    span: JsonSpan,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    found: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expectation_source: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suggestions: Vec<JsonSuggestion>,
+}
+
+impl JsonCheckDiagnostic {
+    fn from(diagnostic: &Diagnostic, level: CheckEventLevel) -> Self {
+        Self {
+            level: level.as_str().to_owned(),
+            severity: severity_label(diagnostic.severity).to_owned(),
+            issue: diagnostic.issue.as_str().to_owned(),
+            source: diagnostic.source_name.clone(),
+            line: diagnostic.location.line,
+            column: diagnostic.location.column,
+            span: JsonSpan::from(diagnostic.span),
+            message: diagnostic.message.clone(),
+            expected: diagnostic.details.expected.clone(),
+            found: diagnostic.details.found.clone(),
+            expectation_source: diagnostic.details.expectation_source.clone(),
+            notes: diagnostic.details.notes.clone(),
+            suggestions: diagnostic
+                .details
+                .suggestions
+                .iter()
+                .map(|suggestion| JsonSuggestion {
+                    kind: suggestion.kind.as_str().to_owned(),
+                    value: suggestion.value.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonSpan {
+    start: usize,
+    end: usize,
+}
+
+impl From<SourceSpan> for JsonSpan {
+    fn from(span: SourceSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonSuggestion {
+    kind: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct JsonCheckEvent {
+    kind: String,
+    level: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+impl JsonCheckEvent {
+    fn message(kind: &str, level: CheckEventLevel, message: String) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            level: level.as_str().to_owned(),
+            message: Some(message),
+            name: None,
+            path: None,
+        }
+    }
+
+    fn partial(kind: &str, event: &PartialEvent) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            level: event.level.as_str().to_owned(),
+            message: None,
+            name: Some(event.name.clone()),
+            path: event.path.as_ref().map(|path| path.display().to_string()),
+        }
+    }
+}
+
+fn validate_semantics_with_events(
     source: &str,
     source_name: &str,
     ast: &Ast,
     schema: Option<&ContextSchema>,
     lambdas: &HashMap<String, LambdaSpec>,
-) -> Vec<Diagnostic> {
+    events: &mut CheckEventBus,
+) -> bool {
     let mut validation = SemanticValidation {
         template_units: &ast.template_units,
         scope_schema: schema.map(ContextSchema::root),
         lambdas,
-        diagnostics: Vec::new(),
+        events,
+        has_error: false,
         in_progress_template_units: HashSet::new(),
     };
     validation.validate_nodes(source, source_name, &ast.nodes);
-    validation.diagnostics
+    validation.has_error
 }
 
-struct SemanticValidation<'a> {
+struct SemanticValidation<'a, 'events> {
     template_units: &'a [TemplateUnit],
     scope_schema: Option<&'a ContextShape>,
     lambdas: &'a HashMap<String, LambdaSpec>,
-    diagnostics: Vec<Diagnostic>,
+    events: &'events mut CheckEventBus,
+    has_error: bool,
     in_progress_template_units: HashSet<usize>,
 }
 
-impl SemanticValidation<'_> {
+impl SemanticValidation<'_, '_> {
     fn validate_nodes(&mut self, source: &str, source_name: &str, nodes: &[Node]) {
         for node in nodes {
             match node {
@@ -377,7 +819,7 @@ impl SemanticValidation<'_> {
                     children,
                 } => {
                     if self.lambdas.contains_key(name) {
-                        self.diagnostics.push(source_diagnostic_with_severity(
+                        self.emit_diagnostic(source_diagnostic_with_severity(
                             DiagnosticSeverity::Error,
                             IssueKind::InvalidLambdaUsage,
                             source,
@@ -404,12 +846,36 @@ impl SemanticValidation<'_> {
                 Node::Parent { children, .. } | Node::Block { children, .. } => {
                     self.validate_nodes(source, source_name, children);
                 }
-                Node::ResolvedPartial { template_id, .. } => {
+                Node::ResolvedPartial {
+                    name,
+                    span,
+                    resolved_path,
+                    template_id,
+                    recursive,
+                } => {
+                    let partial_event = PartialEvent::new(name.clone())
+                        .with_path(resolved_path.clone())
+                        .with_referrer(
+                            source_name.to_owned(),
+                            SourceSpan::new(span.start, span.end),
+                        )
+                        .recursive(*recursive);
+                    if *recursive {
+                        let _ = self
+                            .events
+                            .emit(CheckEvent::PartialSkipped(partial_event.clone()));
+                        self.emit_recursive_partial_skipped(source, source_name, span, name);
+                        continue;
+                    }
                     if !self.in_progress_template_units.insert(*template_id) {
+                        let _ = self
+                            .events
+                            .emit(CheckEvent::PartialSkipped(partial_event.recursive(true)));
+                        self.emit_recursive_partial_skipped(source, source_name, span, name);
                         continue;
                     }
                     let Some(unit) = self.template_units.get(*template_id) else {
-                        self.diagnostics.push(source_diagnostic(
+                        self.emit_diagnostic(source_diagnostic(
                             IssueKind::UnresolvedPartial,
                             source,
                             source_name,
@@ -421,7 +887,11 @@ impl SemanticValidation<'_> {
                         self.in_progress_template_units.remove(template_id);
                         continue;
                     };
+                    let _ = self
+                        .events
+                        .emit(CheckEvent::PartialStarted(partial_event.clone()));
                     self.validate_nodes(&unit.raw_data, &unit.source.name, &unit.nodes);
+                    let _ = self.events.emit(CheckEvent::PartialFinished(partial_event));
                     self.in_progress_template_units.remove(template_id);
                 }
                 Node::Text { .. }
@@ -482,7 +952,7 @@ impl SemanticValidation<'_> {
                 }
                 SectionScope::Invalid { shape, optional } => {
                     self.warn_optional_path(source, source_name, name, span, optional);
-                    self.diagnostics.push(
+                    self.emit_diagnostic(
                         source_diagnostic(
                             IssueKind::UnexpectedSchemaType,
                             source,
@@ -521,6 +991,24 @@ impl SemanticValidation<'_> {
         }
         self.validate_nodes(source, source_name, children);
         self.scope_schema = previous_scope;
+    }
+
+    fn emit_recursive_partial_skipped(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        span: &std::ops::Range<usize>,
+        name: &str,
+    ) {
+        self.emit_diagnostic(source_diagnostic(
+            IssueKind::PartialSkipped,
+            source,
+            source_name,
+            span,
+            format!(
+                "recursive partial `{name}` detected; body was not validated to avoid infinite recursion"
+            ),
+        ));
     }
 
     fn validate_lambda_variable(
@@ -562,7 +1050,7 @@ impl SemanticValidation<'_> {
         lambda: &LambdaSpec,
         actual_usage: &str,
     ) {
-        self.diagnostics.push(
+        self.emit_diagnostic(
             source_diagnostic(
                 IssueKind::InvalidLambdaUsage,
                 source,
@@ -591,7 +1079,7 @@ impl SemanticValidation<'_> {
         if shape_renders_as_scalar(returns) {
             return;
         }
-        self.diagnostics.push(
+        self.emit_diagnostic(
             source_diagnostic(
                 IssueKind::LambdaTypeMismatch,
                 source,
@@ -620,7 +1108,7 @@ impl SemanticValidation<'_> {
         if let Some(argument) = &lambda.argument
             && !shape_accepts_section_argument(argument)
         {
-            self.diagnostics.push(
+            self.emit_diagnostic(
                 source_diagnostic(
                     IssueKind::LambdaTypeMismatch,
                     source,
@@ -644,7 +1132,7 @@ impl SemanticValidation<'_> {
         if shape_renders_as_scalar(returns) {
             return;
         }
-        self.diagnostics.push(
+        self.emit_diagnostic(
             source_diagnostic(
                 IssueKind::LambdaTypeMismatch,
                 source,
@@ -700,7 +1188,7 @@ impl SemanticValidation<'_> {
         if !known_fields.is_empty() {
             message.push_str(&format!("; known fields: {}", known_fields.join(", ")));
         }
-        self.diagnostics.push(
+        self.emit_diagnostic(
             source_diagnostic(
                 IssueKind::MissingSchemaPath,
                 source,
@@ -728,7 +1216,7 @@ impl SemanticValidation<'_> {
         if !known_fields.is_empty() {
             message.push_str(&format!("; known fields: {}", known_fields.join(", ")));
         }
-        self.diagnostics.push(
+        self.emit_diagnostic(
             source_diagnostic(
                 IssueKind::MissingSchemaPath,
                 source,
@@ -755,7 +1243,7 @@ impl SemanticValidation<'_> {
         let Some(optional_path) = optional else {
             return;
         };
-        self.diagnostics.push(
+        self.emit_diagnostic(
             source_diagnostic(
                 IssueKind::OptionalSchemaPath,
                 source,
@@ -777,7 +1265,7 @@ impl SemanticValidation<'_> {
         traversed_path: &str,
         shape: &ContextShape,
     ) {
-        self.diagnostics.push(
+        self.emit_diagnostic(
             source_diagnostic(
                 IssueKind::InvalidSchemaTraversal,
                 source,
@@ -792,6 +1280,11 @@ impl SemanticValidation<'_> {
             .with_found(shape_description(shape))
             .with_expectation_source("context schema"),
         );
+    }
+
+    fn emit_diagnostic(&mut self, diagnostic: Diagnostic) {
+        self.has_error |= diagnostic.severity == DiagnosticSeverity::Error;
+        let _ = self.events.emit(CheckEvent::diagnostic(diagnostic));
     }
 }
 
@@ -961,5 +1454,26 @@ fn severity_label(severity: DiagnosticSeverity) -> &'static str {
         DiagnosticSeverity::Warning => "warning",
         DiagnosticSeverity::Info => "info",
         DiagnosticSeverity::Debug => "debug",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_listener_rejects_run_finished_while_input_is_in_progress() {
+        let mut listener = JsonListener::with_writer(Vec::new(), CheckEventLevel::Warning);
+
+        listener
+            .on_event(&CheckEvent::InputStarted {
+                source_name: "template.mustache".to_owned(),
+            })
+            .expect("input start");
+        let error = listener
+            .on_event(&CheckEvent::run_finished(false))
+            .expect_err("run-finished should fail while input is active");
+
+        assert!(error.contains("input was still in progress"));
     }
 }

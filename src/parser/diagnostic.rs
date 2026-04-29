@@ -23,6 +23,7 @@ pub enum IssueKind {
     LambdaTypeMismatch,
     FrontmatterParseError,
     UnsupportedIncludes,
+    PartialSkipped,
     MalformedInheritance,
     MalformedDynamicName,
 }
@@ -45,6 +46,7 @@ impl IssueKind {
             Self::LambdaTypeMismatch => "LambdaTypeMismatch",
             Self::FrontmatterParseError => "FrontmatterParseError",
             Self::UnsupportedIncludes => "UnsupportedIncludes",
+            Self::PartialSkipped => "PartialSkipped",
             Self::MalformedInheritance => "MalformedInheritance",
             Self::MalformedDynamicName => "MalformedDynamicName",
         }

@@ -37,6 +37,35 @@ pub enum Commands {
 
 #[derive(Debug, Parser)]
 pub struct CheckArgs {
+    #[arg(
+        long,
+        short = 'j',
+        conflicts_with = "no_json",
+        help = "Use JSON output by default unless --format explicitly selects another output"
+    )]
+    pub json: bool,
+
+    #[arg(
+        long = "no-json",
+        conflicts_with = "json",
+        help = "Use compiler-style output by default unless --format explicitly selects another output"
+    )]
+    pub no_json: bool,
+
+    #[arg(
+        long,
+        value_name = "FORMAT",
+        help = "Select the output format explicitly; overrides --json and --no-json"
+    )]
+    pub format: Option<config::CheckOutputFormat>,
+
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        help = "Set diagnostic verbosity: error|warning|info|debug|trace; higher levels include lower-level messages"
+    )]
+    pub verbosity: Option<config::CheckVerbosity>,
+
     #[arg(long, value_name = "PATH|none")]
     pub schema: Option<String>,
 

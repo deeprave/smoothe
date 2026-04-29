@@ -190,6 +190,371 @@ fn check_command_warns_for_unknown_schema_variable() {
 }
 
 #[test]
+fn check_command_json_outputs_grouped_diagnostics() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{user.email}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","additionalProperties":false,"properties":{"user":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--json")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(json["inputs"].as_array().expect("inputs").len(), 1);
+    assert_eq!(
+        json["inputs"][0]["warnings"][0]["issue"],
+        "MissingSchemaPath"
+    );
+    assert_eq!(json["inputs"][0]["warnings"][0]["level"], "warning");
+    assert_eq!(
+        json["inputs"][0]["errors"]
+            .as_array()
+            .expect("errors")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn check_command_json_groups_mixed_severity_diagnostics_for_one_input() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "Hello {{user.email}} {{/unexpected}}",
+    );
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","additionalProperties":false,"properties":{"user":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--json")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+    let first = &json["inputs"][0];
+
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(json["inputs"].as_array().expect("inputs").len(), 1);
+    assert_eq!(first["errors"][0]["issue"], "UnmatchedClosingTag");
+    assert!(
+        first["errors"][0]["message"]
+            .as_str()
+            .expect("error message")
+            .contains("unexpected")
+    );
+    assert_eq!(first["warnings"][0]["issue"], "MissingSchemaPath");
+    assert!(
+        first["warnings"][0]["message"]
+            .as_str()
+            .expect("warning message")
+            .contains("user.email")
+    );
+}
+
+#[test]
+fn check_command_json_outputs_run_level_diagnostics() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
+    let schema = write_template(&dir, "context.json", "{not json");
+
+    let output = smoothe()
+        .arg("check")
+        .arg("--json")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(json["has_error"], Value::Bool(false));
+    assert_eq!(json["warnings"][0]["issue"], "SchemaInputError");
+    assert!(
+        json["warnings"][0]["message"]
+            .as_str()
+            .expect("message")
+            .contains("failed to parse schema")
+    );
+    assert_eq!(json["inputs"][0]["warnings"], Value::Array(Vec::new()));
+}
+
+#[test]
+fn check_command_accepts_format_selection() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
+
+    let compiler = smoothe()
+        .arg("check")
+        .arg("--format")
+        .arg("compiler")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(compiler.status.success());
+    assert!(compiler.stdout.is_empty());
+
+    let json = smoothe()
+        .arg("check")
+        .arg("--format")
+        .arg("json")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(json.status.success());
+    assert!(json.stderr.is_empty());
+    assert!(json_stdout(&json)["inputs"].is_array());
+}
+
+#[test]
+fn check_command_json_flags_override_configured_default_output() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
+    fs::write(dir.join("smoothe.toml"), "[check]\noutput = \"json\"\n").expect("write config");
+
+    let compiler = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg("--no-json")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(compiler.status.success());
+    assert!(compiler.stdout.is_empty());
+
+    fs::write(dir.join("smoothe.toml"), "[check]\noutput = \"compiler\"\n").expect("write config");
+    let json = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg("--json")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(json.status.success());
+    assert!(json.stderr.is_empty());
+    assert!(json_stdout(&json)["inputs"].is_array());
+}
+
+#[test]
+fn check_command_format_overrides_json_default_flags() {
+    let output = smoothe_with_stdin(
+        &["check", "--json", "--format", "compiler", "-"],
+        "{{name}}",
+    );
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn check_command_rejects_conflicting_json_default_flags() {
+    let output = smoothe_with_stdin(&["check", "--json", "--no-json", "-"], "{{name}}");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("cannot be used with"));
+}
+
+#[test]
+fn check_command_verbosity_filters_display_but_not_exit_status() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{user.email}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","additionalProperties":false,"properties":{"user":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--verbosity")
+        .arg("error")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_debug_verbosity_outputs_partial_lifecycle_events() {
+    let dir = temp_dir();
+    let partials = dir.join("_partials");
+    fs::create_dir(&partials).expect("create partials dir");
+    fs::write(partials.join("_profile.mustache"), "Profile {{name}}").expect("write partial");
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "---\nincludes:\n  - _partials/profile.mustache\n---\nHello {{> profile}}",
+    );
+
+    let output = smoothe()
+        .arg("check")
+        .arg("--verbosity")
+        .arg("debug")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("debug"));
+    assert!(stderr.contains("partial: debug: partial-started"));
+    assert!(stderr.contains("profile"));
+    assert!(stderr.contains("partial: debug: partial-finished"));
+}
+
+#[test]
+fn check_command_warns_when_recursive_partial_body_is_skipped() {
+    let dir = temp_dir();
+    let partials = dir.join("_partials");
+    fs::create_dir(&partials).expect("create partials dir");
+    fs::write(partials.join("_self.mustache"), "Self {{> self}}").expect("write partial");
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "---\nincludes:\n  - _partials/self.mustache\n---\nHello {{> self}}",
+    );
+
+    let output = smoothe()
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("PartialSkipped"));
+    assert!(stderr.contains("recursive partial `self` detected"));
+    assert!(stderr.contains("body was not validated"));
+}
+
+#[test]
+fn check_command_trace_verbosity_outputs_trace_events() {
+    let output = smoothe_with_stdin(&["check", "--verbosity", "trace", "-"], "{{name}}");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("trace"));
+    assert!(stderr.contains("check-input"));
+}
+
+#[test]
+fn check_command_uses_configured_json_output_and_cli_override() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
+    fs::write(dir.join("smoothe.toml"), "[check]\noutput = \"json\"\n").expect("write config");
+
+    let configured = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(configured.status.success());
+    assert!(configured.stderr.is_empty());
+    assert!(json_stdout(&configured)["inputs"].is_array());
+
+    let overridden = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg("--format")
+        .arg("compiler")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(overridden.status.success());
+    assert!(overridden.stdout.is_empty());
+}
+
+#[test]
+fn check_command_uses_configured_verbosity_and_cli_override() {
+    let dir = temp_dir();
+    let home = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{name}}");
+    fs::write(dir.join("smoothe.toml"), "[check]\nverbosity = \"trace\"\n").expect("write config");
+
+    let configured = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(configured.status.success());
+    assert!(stderr(&configured).contains("trace"));
+
+    let overridden = smoothe_with_isolated_config(&dir, &home)
+        .arg("check")
+        .arg("--verbosity")
+        .arg("error")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    assert!(overridden.status.success());
+    assert!(overridden.stderr.is_empty());
+}
+
+#[test]
+fn check_command_rejects_invalid_verbosity_values() {
+    let output = smoothe_with_stdin(&["check", "--verbosity", "verbose", "-"], "{{name}}");
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("invalid value"));
+}
+
+#[test]
+fn check_command_json_debug_output_includes_partial_events() {
+    let dir = temp_dir();
+    let partials = dir.join("_partials");
+    fs::create_dir(&partials).expect("create partials dir");
+    fs::write(partials.join("_profile.mustache"), "Profile {{name}}").expect("write partial");
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "---\nincludes:\n  - _partials/profile.mustache\n---\nHello {{> profile}}",
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--json")
+        .arg("--verbosity")
+        .arg("debug")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+    let events = json["inputs"][0]["events"].as_array().expect("events");
+
+    assert!(output.status.success());
+    assert!(
+        events
+            .iter()
+            .any(|event| event["kind"] == "partial-started")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["kind"] == "partial-finished")
+    );
+}
+
+#[test]
 fn check_command_suggests_nearby_schema_fields() {
     let dir = temp_dir();
     let template = write_template(&dir, "template.mustache", "Hello {{user.nmae}}");

@@ -121,3 +121,28 @@ fn check_semantic_input_paths_resolve_relative_to_config_file() {
         config::SemanticInput::Path("tests/fixtures/lambdas/known.json".into())
     );
 }
+
+#[test]
+fn check_output_and_verbosity_defaults_are_configurable() {
+    let config = parse_config("[check]\noutput = \"json\"\nverbosity = \"debug\"\n");
+    let options = config::resolve_with_environment(
+        &config,
+        &cli_options(),
+        config::EnvironmentOptions { nocolor: false },
+    );
+
+    assert_eq!(options.check.output, config::CheckOutputFormat::Json);
+    assert_eq!(options.check.verbosity, config::CheckVerbosity::Debug);
+}
+
+#[test]
+fn check_verbosity_accepts_trace() {
+    let config = parse_config("[check]\nverbosity = \"trace\"\n");
+    let options = config::resolve_with_environment(
+        &config,
+        &cli_options(),
+        config::EnvironmentOptions { nocolor: false },
+    );
+
+    assert_eq!(options.check.verbosity, config::CheckVerbosity::Trace);
+}

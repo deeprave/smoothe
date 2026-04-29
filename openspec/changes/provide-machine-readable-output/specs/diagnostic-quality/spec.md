@@ -1,30 +1,30 @@
 ## ADDED Requirements
 
-### Requirement: Formatter Diagnostic Projection
+### Requirement: Event Diagnostic Projection
 
-The system SHALL project enriched diagnostic data through selected check output
-formatters.
+The system SHALL project enriched diagnostic data through check diagnostic
+events and selected output listeners.
 
-#### Scenario: Formatter receives structured diagnostic data
+#### Scenario: Diagnostic event carries structured diagnostic data
 
-- **WHEN** check diagnostics are ready for output
-- **THEN** the selected formatter receives structured diagnostic data including
+- **WHEN** check diagnostics are emitted
+- **THEN** the diagnostic event carries structured diagnostic data including
   severity, issue, source, location, span, message, and optional details.
 
-#### Scenario: Compiler formatter projects diagnostic details
+#### Scenario: Compiler listener projects diagnostic details
 
 - **WHEN** compiler-style check output renders a diagnostic with structured
   details
-- **THEN** the formatter includes useful detail text without changing the
+- **THEN** the listener includes useful detail text without changing the
   diagnostic issue identifier.
 
-#### Scenario: JSON formatter projects diagnostic details
+#### Scenario: JSON listener projects diagnostic details
 
 - **WHEN** JSON check output renders a diagnostic with structured details
-- **THEN** the formatter includes those details as structured JSON fields.
+- **THEN** the listener includes those details as structured JSON fields.
 
-#### Scenario: Formatter does not mutate diagnostics
+#### Scenario: Listener does not mutate diagnostics
 
-- **WHEN** a formatter emits diagnostics
+- **WHEN** a listener emits diagnostics
 - **THEN** it does not change diagnostic severity, issue kind, source location,
   or exit-status behavior.
