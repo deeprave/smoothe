@@ -3,7 +3,6 @@
 ## Purpose
 Define parser input extensions for partial mappings, lambda/helper recognition,
 context schemas, and source position metadata.
-
 ## Requirements
 ### Requirement: Extended Parser Inputs
 
@@ -31,34 +30,6 @@ metadata.
 - **WHEN** a caller provides a body byte offset and body starting line number
 - **THEN** the parser uses that metadata when calculating source locations for
   diagnostics.
-
-### Requirement: One-Level Partial Parsing
-
-The system SHALL resolve configured partials relative to the source template
-root and parse one level of inclusion.
-
-#### Scenario: Configured partial is resolved
-
-- **WHEN** a template references `{{> header}}` and parser input maps `header`
-  to `partials/header.mustache`
-- **THEN** the parser resolves that path relative to the source template root.
-
-#### Scenario: Configured partial is parsed
-
-- **WHEN** a resolved partial file is readable
-- **THEN** the parser parses the partial source and attaches the parsed partial
-  model to parser state.
-
-#### Scenario: Missing partial reports diagnostic
-
-- **WHEN** a template references a partial absent from the partial mapping
-- **THEN** the parser emits a diagnostic for the unresolved partial.
-
-#### Scenario: Nested partial is not recursively expanded
-
-- **WHEN** a one-level parsed partial references another partial
-- **THEN** the parser records the nested reference but does not parse the nested
-  partial source in the same parse operation.
 
 ### Requirement: Lambda Recognition
 
@@ -96,3 +67,46 @@ Schema where practical.
 
 - **WHEN** no context schema is provided
 - **THEN** the parser still parses the template without schema-path warnings.
+
+### Requirement: Full Partial Graph Parsing
+
+The system SHALL resolve configured static partials relative to the source
+template root and parse the full reachable static partial graph as separate
+template units.
+
+#### Scenario: Configured partial is resolved
+
+- **WHEN** a template references `{{> header}}` and parser input maps `header`
+  to `partials/header.mustache`
+- **THEN** the parser resolves that path relative to the source template root.
+
+#### Scenario: Configured partial is parsed
+
+- **WHEN** a resolved partial file is readable
+- **THEN** the parser parses the partial source as a separate template unit and
+  includes that unit in the returned AST graph.
+
+#### Scenario: Missing partial reports diagnostic
+
+- **WHEN** a template references a partial absent from the partial mapping
+- **THEN** the parser emits an error diagnostic for the unresolved partial.
+
+#### Scenario: Nested partial is resolved into graph
+
+- **WHEN** a resolved partial references another mapped partial
+- **THEN** the parser resolves and parses the nested partial source in the same
+  parse operation.
+
+#### Scenario: Partial graph preserves source metadata
+
+- **WHEN** parser input resolves and parses partial files
+- **THEN** each parsed partial retains its partial name, resolved path, body
+  offset, and body starting line metadata.
+
+#### Scenario: Recursive partial reference preserves graph
+
+- **WHEN** recursive partial parsing detects that a partial path is already in
+  the active resolution stack
+- **THEN** the parser records a recursive reference to the existing parsed
+  template unit without expanding that branch indefinitely.
+
