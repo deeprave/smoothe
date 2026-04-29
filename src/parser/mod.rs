@@ -193,7 +193,7 @@ impl<'a> Parser<'a> {
 
             match tag.kind {
                 TagKind::EscapedVariable(name) => {
-                    if self.is_lambda(&name) {
+                    if self.is_variable_lambda(&name) {
                         nodes.push(Node::lambda_variable(name, tag.span));
                     } else {
                         nodes.push(Node::escaped_variable(name, tag.span));
@@ -214,7 +214,7 @@ impl<'a> Parser<'a> {
                 TagKind::Section { name, inverted } => {
                     let kind = if inverted {
                         ContainerKind::InvertedSection
-                    } else if self.is_lambda(&name) {
+                    } else if self.is_section_lambda(&name) {
                         ContainerKind::LambdaSection
                     } else {
                         ContainerKind::Section
@@ -611,26 +611,7 @@ impl<'a> Parser<'a> {
             return;
         }
 
-        let lambda_names = self
-            .lambdas
-            .iter()
-            .map(|lambda| lambda.name.clone())
-            .collect::<HashSet<_>>();
-        self.state
-            .lambda_references
-            .extend(
-                collect_reference_nodes(nodes)
-                    .into_iter()
-                    .filter_map(|reference| {
-                        lambda_names
-                            .contains(&reference.name)
-                            .then(|| LambdaReference {
-                                name: reference.name,
-                                source_name: self.source_name.clone(),
-                                span: SourceSpan::new(reference.span.start, reference.span.end),
-                            })
-                    }),
-            );
+        self.record_lambda_references(nodes);
     }
 
     fn index_advanced_nodes(&mut self, nodes: &[Node]) {
@@ -862,8 +843,56 @@ impl<'a> Parser<'a> {
         );
     }
 
-    fn is_lambda(&self, name: &str) -> bool {
-        self.lambdas.iter().any(|lambda| lambda.name == name)
+    fn record_lambda_references(&mut self, nodes: &[Node]) {
+        for node in nodes {
+            match node {
+                Node::LambdaVariable { name, span } => {
+                    self.state.lambda_references.push(LambdaReference {
+                        name: name.clone(),
+                        source_name: self.source_name.clone(),
+                        span: SourceSpan::new(span.start, span.end),
+                    });
+                }
+                Node::LambdaSection {
+                    name,
+                    span,
+                    children,
+                } => {
+                    self.state.lambda_references.push(LambdaReference {
+                        name: name.clone(),
+                        source_name: self.source_name.clone(),
+                        span: SourceSpan::new(span.start, span.end),
+                    });
+                    self.record_lambda_references(children);
+                }
+                Node::Section { children, .. }
+                | Node::InvertedSection { children, .. }
+                | Node::Parent { children, .. }
+                | Node::Block { children, .. } => {
+                    self.record_lambda_references(children);
+                }
+                Node::Text { .. }
+                | Node::EscapedVariable { .. }
+                | Node::UnescapedVariable { .. }
+                | Node::Comment { .. }
+                | Node::Partial { .. }
+                | Node::ResolvedPartial { .. }
+                | Node::DynamicPartial { .. }
+                | Node::DelimiterChange { .. } => {}
+            }
+        }
+    }
+
+    fn is_variable_lambda(&self, name: &str) -> bool {
+        self.lambdas
+            .iter()
+            .any(|lambda| lambda.name == name && lambda.usage.allows_variable())
+    }
+
+    fn is_section_lambda(&self, name: &str) -> bool {
+        self.lambdas
+            .iter()
+            .any(|lambda| lambda.name == name && lambda.usage.allows_section())
     }
 
     fn push_text(&self, nodes: &mut Vec<Node>, start: usize, end: usize) {
@@ -1094,55 +1123,6 @@ fn collect_partial_nodes_into(nodes: &[Node], partials: &mut Vec<NamedSpan>) {
             | Node::LambdaVariable { .. }
             | Node::UnescapedVariable { .. }
             | Node::Comment { .. }
-            | Node::ResolvedPartial { .. }
-            | Node::DynamicPartial { .. }
-            | Node::DelimiterChange { .. } => {}
-        }
-    }
-}
-
-fn collect_reference_nodes(nodes: &[Node]) -> Vec<NamedSpan> {
-    let mut references = Vec::new();
-    collect_reference_nodes_into(nodes, &mut references);
-    references
-}
-
-fn collect_reference_nodes_into(nodes: &[Node], references: &mut Vec<NamedSpan>) {
-    for node in nodes {
-        match node {
-            Node::EscapedVariable { name, span }
-            | Node::LambdaVariable { name, span }
-            | Node::UnescapedVariable { name, span } => references.push(NamedSpan {
-                name: name.clone(),
-                span: span.clone(),
-            }),
-            Node::Section {
-                name,
-                span,
-                children,
-            }
-            | Node::InvertedSection {
-                name,
-                span,
-                children,
-            }
-            | Node::LambdaSection {
-                name,
-                span,
-                children,
-            } => {
-                references.push(NamedSpan {
-                    name: name.clone(),
-                    span: span.clone(),
-                });
-                collect_reference_nodes_into(children, references);
-            }
-            Node::Parent { children, .. } | Node::Block { children, .. } => {
-                collect_reference_nodes_into(children, references);
-            }
-            Node::Text { .. }
-            | Node::Comment { .. }
-            | Node::Partial { .. }
             | Node::ResolvedPartial { .. }
             | Node::DynamicPartial { .. }
             | Node::DelimiterChange { .. } => {}

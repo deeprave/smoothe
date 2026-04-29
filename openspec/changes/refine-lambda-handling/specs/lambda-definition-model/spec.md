@@ -92,11 +92,10 @@ definitions without executing lambda code.
 - **WHEN** a template uses a known variable-only lambda as a positive section
 - **THEN** the system emits a warning diagnostic for incompatible lambda usage.
 
-#### Scenario: Unknown lambda warns
+#### Scenario: Unknown names remain ordinary references
 
-- **WHEN** a template reference is identifiable as a lambda reference and no
-  matching definition is supplied
-- **THEN** the system emits a warning diagnostic for the unknown lambda.
+- **WHEN** a template reference does not match a supplied lambda definition
+- **THEN** the system does not infer that the reference is an unknown lambda.
 
 ### Requirement: Inverted Lambda Rejection
 

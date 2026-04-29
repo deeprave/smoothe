@@ -38,21 +38,20 @@ definitions when they are available.
 
 - **WHEN** a template uses a variable tag whose name matches a lambda definition
   that allows variable usage
-- **THEN** the system does not emit an unknown-lambda or invalid-lambda-usage
-  warning for that reference.
+- **THEN** the system does not emit an invalid-lambda-usage warning for that
+  reference.
 
 #### Scenario: Known section lambda is accepted
 
 - **WHEN** a template uses a positive section whose name matches a lambda
   definition that allows section usage
-- **THEN** the system does not emit an unknown-lambda or invalid-lambda-usage
-  warning for that section.
+- **THEN** the system does not emit an invalid-lambda-usage warning for that
+  section.
 
-#### Scenario: Unknown lambda emits warning
+#### Scenario: Unknown names remain ordinary references
 
-- **WHEN** a template reference can be identified as a lambda reference but no
-  matching lambda definition is provided
-- **THEN** the system emits a warning diagnostic for that reference.
+- **WHEN** a template reference does not match a supplied lambda definition
+- **THEN** the system does not infer that the reference is an unknown lambda.
 
 #### Scenario: Incompatible lambda usage emits warning
 

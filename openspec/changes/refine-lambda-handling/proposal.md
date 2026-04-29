@@ -16,7 +16,6 @@ whether its behavior may have side effects.
   - side-effect metadata
 - Validate lambda references in templates against the supplied lambda
   definitions.
-- Warn when a referenced lambda is unknown.
 - Warn when a known lambda is used in an unsupported form, such as variable
   usage for section-only lambdas.
 - Warn when lambda argument or return type appears incompatible with the
@@ -47,7 +46,6 @@ whether its behavior may have side effects.
 - Affects `check` semantic validation and lambda definition loading.
 - May change lambda diagnostics from broad warnings to more specific warnings
   or errors.
-- Requires tests for known lambdas, unknown lambdas, variable/section
-  compatibility, inverted lambda sections, type compatibility, and side-effect
-  metadata.
+- Requires tests for known lambdas, variable/section compatibility, inverted
+  lambda sections, type compatibility, and side-effect metadata.
 - Does not require executing lambdas or validating runtime effects.

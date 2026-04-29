@@ -24,8 +24,8 @@ Mustache usage, and whether the lambda is declared as having side effects.
   type concepts where practical.
 - Preserve side-effect metadata for diagnostics, policy checks, and future
   integrations.
-- Validate known and unknown lambda references without executing lambdas.
-- Warn for unknown lambdas and incompatible variable/section usage.
+- Validate known lambda references without executing lambdas.
+- Warn for incompatible variable/section usage.
 - Emit an error when an inverted section resolves to a known lambda.
 - Warn or error for detectable lambda type incompatibility according to the
   severity defined by the lambda rule.
@@ -38,6 +38,8 @@ Mustache usage, and whether the lambda is declared as having side effects.
 - Do not evaluate lambda output content.
 - Do not infer arbitrary lambda names from normal variables unless the AST or
   supplied definitions make the reference identifiable as a lambda reference.
+- Do not warn for unknown lambda names when ordinary Mustache syntax cannot
+  distinguish them from context variables.
 - Do not require lambda definitions for ordinary parsing.
 
 ## Decisions
@@ -126,8 +128,9 @@ Mustache usage, and whether the lambda is declared as having side effects.
 ## Risks / Trade-offs
 
 - Distinguishing lambdas from variables can be ambiguous. Mitigation: only
-  report unknown-lambda warnings for references the parser classifies as lambda
-  references or names that are checked against supplied lambda definitions.
+  apply lambda diagnostics to references that resolve through supplied lambda
+  definitions. Unknown-lambda diagnostics are deferred until there is an
+  independent source that can identify a reference as a lambda.
 - Type compatibility may be incomplete until the context schema model is
   refined. Mitigation: perform best-effort checks and avoid diagnostics when
   shape information is unknown.
@@ -148,16 +151,16 @@ Mustache usage, and whether the lambda is declared as having side effects.
   input warnings for invalid definitions.
 - Derive parser lambda names/forms from structured definitions where needed for
   AST classification.
-- Update semantic validation to use the structured model for known, unknown,
-  and incompatible lambda usage.
+- Update semantic validation to use the structured model for known and
+  incompatible lambda usage.
 - Change inverted known-lambda sections from warning diagnostics to error
   diagnostics.
 - Add best-effort argument and return shape compatibility checks.
 - Preserve `--lambdas none`, `[check] lambdas = "none"`, and syntax-only check
   behavior.
-- Add tests for valid definitions, invalid definitions, known and unknown
-  lambdas, variable/section/both usage, inverted lambda errors, type
-  compatibility, and side-effect metadata.
+- Add tests for valid definitions, invalid definitions, known lambdas,
+  variable/section/both usage, inverted lambda errors, type compatibility, and
+  side-effect metadata.
 
 ## Open Questions
 

@@ -6,6 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use smoothe::lambda::LambdaUsage;
 use smoothe::parser::{
     Diagnostic, DiagnosticSeverity, IssueKind, LambdaSpec, Node, ParseEvent, ParserInput,
     PartialMapping, SourceMetadata, TemplateName, parse,
@@ -513,6 +514,33 @@ fn upstream_lambda_fixture_cases_are_modeled_without_execution() {
         ]
     );
     assert_eq!(result.state.lambda_references.len(), 2);
+}
+
+#[test]
+fn recognizes_configured_lambdas_only_for_allowed_usage_forms() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{var_only}} {{#var_only}}x{{/var_only}} {{section_only}} {{#section_only}}x{{/section_only}} {{both}} {{#both}}x{{/both}}",
+    );
+    input
+        .lambdas
+        .push(LambdaSpec::new("var_only").with_usage(LambdaUsage::Variable));
+    input
+        .lambdas
+        .push(LambdaSpec::new("section_only").with_usage(LambdaUsage::Section));
+    input
+        .lambdas
+        .push(LambdaSpec::new("both").with_usage(LambdaUsage::Both));
+
+    let result = parse(input);
+
+    assert!(matches!(result.ast.nodes[0], Node::LambdaVariable { .. }));
+    assert!(matches!(result.ast.nodes[2], Node::Section { .. }));
+    assert!(matches!(result.ast.nodes[4], Node::EscapedVariable { .. }));
+    assert!(matches!(result.ast.nodes[6], Node::LambdaSection { .. }));
+    assert!(matches!(result.ast.nodes[8], Node::LambdaVariable { .. }));
+    assert!(matches!(result.ast.nodes[10], Node::LambdaSection { .. }));
+    assert_eq!(result.state.lambda_references.len(), 4);
 }
 
 #[test]

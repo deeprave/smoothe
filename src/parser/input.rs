@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+pub use crate::lambda::LambdaSpec;
+
 pub struct ParserInput<'a> {
     pub source: SourceMetadata,
     pub source_text: &'a str,
@@ -64,17 +66,6 @@ impl PartialMapping {
             name: name.into(),
             path: path.into(),
         }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LambdaSpec {
-    pub name: String,
-}
-
-impl LambdaSpec {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
     }
 }
 

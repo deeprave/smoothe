@@ -14,6 +14,9 @@ came from, and what nearby valid choices exist.
   resolved partials.
 - Include schema-aware context for missing paths, such as known fields in the
   current object scope.
+- Suppress cascading missing-path diagnostics inside unknown section scopes and
+  replace them with a bounded warning that child references could not be fully
+  validated because the section scope is unknown.
 - Include near-hit suggestions for likely typos in variable paths, schema
   fields, lambda names, and partial names where enough candidates are known.
 - Make semantic diagnostics clearer for schema validation, lambda validation,

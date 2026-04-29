@@ -82,6 +82,34 @@ across primary templates and resolved partials.
 - **THEN** the diagnostic can include the related source location as structured
   detail.
 
+### Requirement: Cascade-Aware Semantic Diagnostics
+
+The system SHALL avoid emitting misleading cascades when an earlier semantic
+diagnostic makes later diagnostics dependent on an unknown scope.
+
+#### Scenario: Unknown section scope suppresses child missing-path cascades
+
+- **WHEN** a section path is missing from the context schema
+- **AND** child references inside that section could depend on the missing
+  section scope
+- **THEN** the system emits the missing-path diagnostic for the section
+- **AND** the system does not emit separate missing-path diagnostics for each
+  child reference as though they were definitely in the outer scope.
+
+#### Scenario: Unknown section scope reports incomplete child validation
+
+- **WHEN** child references are skipped because their enclosing section scope
+  is unknown
+- **THEN** the system emits at most one warning or note explaining that
+  references inside the unknown section could not be fully validated.
+
+#### Scenario: Known section scope still validates children
+
+- **WHEN** a section path resolves to a known object, array, boolean, or lambda
+  behavior
+- **THEN** the system continues validating child references according to the
+  resolved section semantics.
+
 ### Requirement: Diagnostic Text Rendering
 
 The system SHALL render human-readable diagnostic output from the structured

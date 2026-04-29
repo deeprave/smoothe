@@ -29,7 +29,10 @@
 - [ ] 4.4 Attach found scalar shape details for scalar traversal diagnostics.
 - [ ] 4.5 Add near-hit suggestions for missing schema path segments using local object fields.
 - [ ] 4.6 Avoid speculative schema suggestions for permissive object scopes.
-- [ ] 4.7 Add schema diagnostic tests for known fields, optional paths, enum context, scalar traversal, and suggestions.
+- [ ] 4.7 Suppress child missing-path cascades when an enclosing section path is missing from the schema.
+- [ ] 4.8 Emit at most one secondary warning or note when child references cannot be fully validated because their enclosing section scope is unknown.
+- [ ] 4.9 Preserve normal child validation for known object, array, boolean, and lambda section semantics.
+- [ ] 4.10 Add schema diagnostic tests for known fields, optional paths, enum context, scalar traversal, suggestions, and unknown-section cascade suppression.
 
 ## 5. Lambda Diagnostic Enrichment
 

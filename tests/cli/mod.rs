@@ -546,9 +546,9 @@ fn check_command_warns_for_inverted_lambda_section() {
         .expect("run smoothe");
     let stderr = stderr(&output);
 
-    assert!(output.status.success());
+    assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(stderr.contains("warning"));
+    assert!(stderr.contains("error"));
     assert!(stderr.contains("InvalidLambdaUsage"));
     assert!(stderr.contains("inverted"));
 }
@@ -598,6 +598,99 @@ fn check_command_warns_for_incompatible_lambda_usage() {
     assert!(stderr.contains("warning"));
     assert!(stderr.contains("InvalidLambdaUsage"));
     assert!(stderr.contains("markdown"));
+}
+
+#[test]
+fn check_command_does_not_infer_unknown_lambdas_from_plain_variables() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{missing_lambda}}");
+    let lambdas = write_template(
+        &dir,
+        "lambdas.json",
+        r#"{"lambdas":{"markdown":{"usage":"section","argument":{"type":"string"},"returns":{"type":"string"}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_accepts_both_usage_lambdas() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "{{markdown}} {{#markdown}}x{{/markdown}}",
+    );
+    let lambdas = write_template(
+        &dir,
+        "lambdas.json",
+        r#"{"lambdas":{"markdown":{"usage":"both","argument":{"type":"string"},"returns":{"type":"string"},"side_effects":"none"}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_warns_for_lambda_type_incompatibility() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{#markdown}}x{{/markdown}}");
+    let lambdas = write_template(
+        &dir,
+        "lambdas.json",
+        r#"{"lambdas":{"markdown":{"usage":"section","argument":{"type":"object"},"returns":{"type":"array"}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("LambdaTypeMismatch"));
+    assert!(stderr.contains("markdown"));
+    assert!(stderr.contains("argument"));
+    assert!(stderr.contains("return"));
+}
+
+#[test]
+fn check_command_omitted_lambda_shapes_do_not_warn_for_types() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{#markdown}}x{{/markdown}}");
+    let lambdas = write_template(
+        &dir,
+        "lambdas.json",
+        r#"{"lambdas":{"markdown":{"usage":"section","side_effects":"declared"}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--lambdas")
+        .arg(&lambdas)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(!stderr.contains("LambdaTypeMismatch"));
 }
 
 #[test]

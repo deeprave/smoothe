@@ -23,6 +23,8 @@ output and structured JSON output.
 - Add structured diagnostic detail data that can be rendered in text and JSON.
 - Include schema context such as known fields, optionality, enum values, and
   path traversal context.
+- Avoid noisy cascade diagnostics when a missing section scope makes child
+  references impossible to validate accurately.
 - Include lambda context such as expected usage, actual usage, argument shape,
   return shape, and side-effect metadata where relevant.
 - Include partial context such as reference name, mapped path, resolved path,
@@ -102,7 +104,22 @@ output and structured JSON output.
    would lack local validator context such as current schema scope and expected
    usage.
 
-7. Include improved diagnostics in JSON output.
+7. Suppress cascading missing-path diagnostics inside unknown section scopes.
+
+   When a section path is missing from the schema, child references inside that
+   section may be relative to the missing section value rather than the current
+   outer scope. Emit the primary missing-section diagnostic, then avoid
+   producing misleading missing-path diagnostics for each child reference. If
+   the section body contains references that would otherwise be validated, emit
+   at most one secondary warning explaining that those references could not be
+   fully validated because the section scope is unknown.
+
+   Alternative considered: continue validating children against the outer
+   scope. That produces noisy and often false cascades such as warning for
+   `name` and `email` as top-level fields when the real issue is an unknown
+   `user` section.
+
+8. Include improved diagnostics in JSON output.
 
    JSON diagnostics should continue to include issue, source, line, column,
    span, and message. Add optional structured fields for expected, found, notes,
@@ -118,6 +135,10 @@ output and structured JSON output.
   and structured fields, and keep text assertions focused on important phrases.
 - Suggestions can be noisy. Mitigation: generate suggestions only from local
   candidate sets and cap the number of near hits.
+- Cascade suppression can hide independent child issues. Mitigation: suppress
+  only diagnostics whose validity depends on the unknown section scope, and
+  emit a secondary warning that validation coverage inside the section was
+  incomplete.
 - Adding diagnostic detail fields can touch many call sites. Mitigation: keep
   helper constructors and default empty details so simple parser diagnostics
   remain easy to create.
@@ -134,6 +155,9 @@ output and structured JSON output.
 - Add a small near-hit suggestion utility for local candidate sets.
 - Update schema diagnostics to include expected/found/source context, known
   fields, enum values, optionality, and suggestions.
+- Update section-scope diagnostics to suppress child missing-path cascades when
+  the parent section scope is unknown, with a single secondary warning for
+  skipped dependent validation.
 - Update lambda diagnostics to include expected usage, actual usage, shape
   context, side-effect metadata where relevant, and suggestions.
 - Update partial diagnostics to include reference names, candidate partial
