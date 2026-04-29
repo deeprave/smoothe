@@ -171,7 +171,7 @@ fn check_command_warns_for_unknown_schema_variable() {
     let schema = write_template(
         &dir,
         "context.json",
-        r#"{"type":"object","properties":{"user":{"type":"object","properties":{"name":{"type":"string"}}}}}"#,
+        r#"{"type":"object","additionalProperties":false,"properties":{"user":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}}}}}"#,
     );
     let output = smoothe()
         .arg("check")
@@ -203,7 +203,7 @@ fn check_command_validates_variables_inside_frontmatter_included_partials() {
     let schema = write_template(
         &dir,
         "context.json",
-        r#"{"type":"object","properties":{"user":{"type":"object","properties":{"name":{"type":"string"}}}}}"#,
+        r#"{"type":"object","additionalProperties":false,"properties":{"user":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"}}}}}"#,
     );
     let output = smoothe()
         .arg("check")
@@ -286,7 +286,7 @@ fn check_command_resolves_configured_schema_relative_to_config_file() {
     .expect("write config");
     fs::write(
         config_dir.join("context.json"),
-        r#"{"type":"object","properties":{"name":{"type":"string"}}}"#,
+        r#"{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string"}}}"#,
     )
     .expect("write schema");
     let template = write_template(&run_dir, "template.mustache", "Hello {{name}}");
@@ -316,7 +316,7 @@ fn check_command_schema_none_overrides_configured_schema() {
     .expect("write config");
     fs::write(
         config_dir.join("context.json"),
-        r#"{"type":"object","properties":{}}"#,
+        r#"{"type":"object","additionalProperties":false,"properties":{}}"#,
     )
     .expect("write schema");
     let output = smoothe_with_stdin(
@@ -351,9 +351,13 @@ fn check_command_validates_object_and_array_section_scopes() {
         "context.json",
         r#"{
             "type": "object",
+            "required": ["user", "items"],
+            "additionalProperties": false,
             "properties": {
                 "user": {
                     "type": "object",
+                    "required": ["name"],
+                    "additionalProperties": false,
                     "properties": {
                         "name": { "type": "string" }
                     }
@@ -362,6 +366,8 @@ fn check_command_validates_object_and_array_section_scopes() {
                     "type": "array",
                     "items": {
                         "type": "object",
+                        "required": ["title"],
+                        "additionalProperties": false,
                         "properties": {
                             "title": { "type": "string" }
                         }
@@ -389,7 +395,7 @@ fn check_command_warns_for_incompatible_schema_usage() {
     let schema = write_template(
         &dir,
         "context.json",
-        r#"{"type":"object","properties":{"name":{"type":"string"}}}"#,
+        r#"{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string"}}}"#,
     );
     let output = smoothe()
         .arg("check")
@@ -404,6 +410,122 @@ fn check_command_warns_for_incompatible_schema_usage() {
     assert!(stderr.contains("warning"));
     assert!(stderr.contains("UnexpectedSchemaType"));
     assert!(stderr.contains("name"));
+}
+
+#[test]
+fn check_command_includes_enum_values_in_schema_usage_warning() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "{{#phase}}x{{/phase}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","required":["phase"],"additionalProperties":false,"properties":{"phase":{"type":"string","enum":["discussion","planning","implementation"]}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("UnexpectedSchemaType"));
+    assert!(stderr.contains(r#""discussion""#));
+    assert!(stderr.contains(r#""implementation""#));
+}
+
+#[test]
+fn check_command_allows_unknown_paths_for_permissive_objects() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{metadata.anything}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","required":["metadata"],"additionalProperties":false,"properties":{"metadata":{"type":"object"}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn check_command_warns_for_optional_schema_paths() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{user.fullname}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","required":["user"],"additionalProperties":false,"properties":{"user":{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string"},"fullname":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("OptionalSchemaPath"));
+    assert!(stderr.contains("user.fullname"));
+}
+
+#[test]
+fn check_command_warns_for_scalar_schema_traversal() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{user.name.first}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","required":["user"],"additionalProperties":false,"properties":{"user":{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("InvalidSchemaTraversal"));
+    assert!(stderr.contains("user.name"));
+}
+
+#[test]
+fn check_command_validates_boolean_sections_without_changing_scope() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "{{#admin}}{{user.name}}{{/admin}}",
+    );
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","required":["admin","user"],"additionalProperties":false,"properties":{"admin":{"type":"boolean"},"user":{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
 }
 
 #[test]

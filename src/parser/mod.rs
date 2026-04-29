@@ -5,6 +5,7 @@ mod source;
 
 use std::{collections::HashSet, fs, ops::Range, path::PathBuf};
 
+use crate::context_schema::{ContextSchema, ContextShape, PathResolution, SectionScope};
 use crate::source_prepare::prepare_source;
 
 pub use ast::{Ast, Delimiters, Node, TemplateName, TemplateUnit};
@@ -694,6 +695,7 @@ impl<'a> Parser<'a> {
         let Some(schema) = self.context_schema.clone() else {
             return;
         };
+        let schema = ContextSchema::from_json(schema, self.source_name.clone());
 
         let lambda_names = self
             .lambdas
@@ -701,19 +703,163 @@ impl<'a> Parser<'a> {
             .map(|lambda| lambda.name.clone())
             .collect::<HashSet<_>>();
 
-        for reference in collect_reference_nodes(nodes) {
-            if lambda_names.contains(&reference.name) {
-                continue;
-            }
-            if !schema_defines_path(&schema, &reference.name) {
-                self.emit(
-                    DiagnosticSeverity::Warning,
-                    IssueKind::MissingSchemaPath,
-                    reference.span.start..reference.span.end,
-                    format!("missing schema path `{}`", reference.name),
-                );
+        self.check_schema_reference_nodes(&schema, &lambda_names, nodes);
+    }
+
+    fn check_schema_reference_nodes(
+        &mut self,
+        schema: &ContextSchema,
+        lambda_names: &HashSet<String>,
+        nodes: &[Node],
+    ) {
+        for node in nodes {
+            match node {
+                Node::EscapedVariable { name, span }
+                | Node::LambdaVariable { name, span }
+                | Node::UnescapedVariable { name, span } => {
+                    if lambda_names.contains(name) {
+                        continue;
+                    }
+                    self.check_schema_path_reference(schema, name, span);
+                }
+                Node::Section {
+                    name,
+                    span,
+                    children,
+                }
+                | Node::InvertedSection {
+                    name,
+                    span,
+                    children,
+                }
+                | Node::LambdaSection {
+                    name,
+                    span,
+                    children,
+                } => {
+                    if !lambda_names.contains(name) {
+                        self.check_schema_section_reference(schema, name, span);
+                    }
+                    self.check_schema_reference_nodes(schema, lambda_names, children);
+                }
+                Node::Parent { children, .. } | Node::Block { children, .. } => {
+                    self.check_schema_reference_nodes(schema, lambda_names, children);
+                }
+                Node::Text { .. }
+                | Node::Comment { .. }
+                | Node::Partial { .. }
+                | Node::ResolvedPartial { .. }
+                | Node::DynamicPartial { .. }
+                | Node::DelimiterChange { .. } => {}
             }
         }
+    }
+
+    fn check_schema_path_reference(
+        &mut self,
+        schema: &ContextSchema,
+        name: &str,
+        span: &Range<usize>,
+    ) {
+        match schema.resolve_path(name) {
+            PathResolution::Found {
+                optional: Some(optional_path),
+                ..
+            } => self.emit(
+                DiagnosticSeverity::Warning,
+                IssueKind::OptionalSchemaPath,
+                span.start..span.end,
+                format!("schema path `{name}` depends on optional field `{optional_path}`"),
+            ),
+            PathResolution::Missing {
+                missing_path,
+                known_fields,
+            } => self.emit_missing_schema_path(span.start..span.end, &missing_path, known_fields),
+            PathResolution::InvalidTraversal {
+                traversed_path,
+                shape,
+            } => self.emit(
+                DiagnosticSeverity::Warning,
+                IssueKind::InvalidSchemaTraversal,
+                span.start..span.end,
+                format!(
+                    "schema path `{traversed_path}` cannot be traversed because it is {}",
+                    schema_shape_description(shape)
+                ),
+            ),
+            PathResolution::Found { .. } | PathResolution::Permissive { .. } => {}
+        }
+    }
+
+    fn check_schema_section_reference(
+        &mut self,
+        schema: &ContextSchema,
+        name: &str,
+        span: &Range<usize>,
+    ) {
+        match schema.section_scope(name) {
+            SectionScope::Changed { optional, .. } | SectionScope::Current { optional } => {
+                if let Some(optional_path) = optional {
+                    self.emit(
+                        DiagnosticSeverity::Warning,
+                        IssueKind::OptionalSchemaPath,
+                        span.start..span.end,
+                        format!("schema path `{name}` depends on optional field `{optional_path}`"),
+                    );
+                }
+            }
+            SectionScope::Invalid { shape, optional } => {
+                if let Some(optional_path) = optional {
+                    self.emit(
+                        DiagnosticSeverity::Warning,
+                        IssueKind::OptionalSchemaPath,
+                        span.start..span.end,
+                        format!("schema path `{name}` depends on optional field `{optional_path}`"),
+                    );
+                }
+                self.emit(
+                    DiagnosticSeverity::Warning,
+                    IssueKind::UnexpectedSchemaType,
+                    span.start..span.end,
+                    invalid_schema_section_message(name, shape),
+                );
+            }
+            SectionScope::Missing {
+                missing_path,
+                known_fields,
+            } => self.emit_missing_schema_path(span.start..span.end, &missing_path, known_fields),
+            SectionScope::Permissive { .. } => {}
+            SectionScope::InvalidTraversal {
+                traversed_path,
+                shape,
+            } => self.emit(
+                DiagnosticSeverity::Warning,
+                IssueKind::InvalidSchemaTraversal,
+                span.start..span.end,
+                format!(
+                    "schema path `{traversed_path}` cannot be traversed because it is {}",
+                    schema_shape_description(shape)
+                ),
+            ),
+        }
+    }
+
+    fn emit_missing_schema_path(
+        &mut self,
+        span: Range<usize>,
+        missing_path: &str,
+        known_fields: Vec<String>,
+    ) {
+        let mut message = format!("missing schema path `{missing_path}`");
+        if !known_fields.is_empty() {
+            message.push_str(&format!("; known fields: {}", known_fields.join(", ")));
+        }
+        self.emit(
+            DiagnosticSeverity::Warning,
+            IssueKind::MissingSchemaPath,
+            span,
+            message,
+        );
     }
 
     fn is_lambda(&self, name: &str) -> bool {
@@ -1008,19 +1154,31 @@ fn dynamic_expression(name: &str) -> Option<&str> {
     name.strip_prefix('*').map(str::trim)
 }
 
-fn schema_defines_path(schema: &serde_json::Value, path: &str) -> bool {
-    let mut current = schema;
-    for component in path.split('.') {
-        let Some(properties) = current
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-        else {
-            return false;
-        };
-        let Some(next) = properties.get(component) else {
-            return false;
-        };
-        current = next;
+fn invalid_schema_section_message(name: &str, shape: &ContextShape) -> String {
+    let mut message = format!(
+        "schema path `{name}` is not valid as a section because it is {}",
+        schema_shape_description(shape)
+    );
+    if let ContextShape::Scalar { enum_values, .. } = shape
+        && !enum_values.is_empty()
+    {
+        let values = enum_values
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!("; allowed values: {values}"));
     }
-    true
+    message
+}
+
+fn schema_shape_description(shape: &ContextShape) -> String {
+    match shape {
+        ContextShape::Object(_) => "object".to_owned(),
+        ContextShape::Array(_) => "array".to_owned(),
+        ContextShape::Scalar { kind, .. } => format!("{} scalar", kind.as_str()),
+        ContextShape::Any => "any value".to_owned(),
+        ContextShape::Unknown => "unknown schema shape".to_owned(),
+        ContextShape::Unsupported => "unsupported schema shape".to_owned(),
+    }
 }

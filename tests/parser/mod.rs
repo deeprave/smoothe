@@ -596,9 +596,13 @@ fn warns_for_referenced_paths_missing_from_context_schema() {
     );
     input.context_schema = Some(serde_json::json!({
         "type": "object",
+        "required": ["user"],
+        "additionalProperties": false,
         "properties": {
             "user": {
                 "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
                 "properties": {
                     "name": { "type": "string" }
                 }
@@ -619,6 +623,109 @@ fn warns_for_referenced_paths_missing_from_context_schema() {
     );
     assert_eq!(
         result.state.diagnostics[0].message,
-        "missing schema path `user.email`"
+        "missing schema path `user.email`; known fields: name"
+    );
+}
+
+#[test]
+fn warns_for_optional_paths_from_context_schema() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{user.fullname}}",
+    );
+    input.context_schema = Some(serde_json::json!({
+        "type": "object",
+        "required": ["user"],
+        "additionalProperties": false,
+        "properties": {
+            "user": {
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                    "name": { "type": "string" },
+                    "fullname": { "type": "string" }
+                }
+            }
+        }
+    }));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::OptionalSchemaPath
+    );
+    assert_eq!(
+        result.state.diagnostics[0].message,
+        "schema path `user.fullname` depends on optional field `user.fullname`"
+    );
+}
+
+#[test]
+fn warns_for_scalar_traversal_from_context_schema() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{user.name.first}}",
+    );
+    input.context_schema = Some(serde_json::json!({
+        "type": "object",
+        "required": ["user"],
+        "additionalProperties": false,
+        "properties": {
+            "user": {
+                "type": "object",
+                "required": ["name"],
+                "additionalProperties": false,
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        }
+    }));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::InvalidSchemaTraversal
+    );
+    assert_eq!(
+        result.state.diagnostics[0].message,
+        "schema path `user.name` cannot be traversed because it is string scalar"
+    );
+}
+
+#[test]
+fn warns_for_invalid_section_type_from_context_schema() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{#name}}x{{/name}}",
+    );
+    input.context_schema = Some(serde_json::json!({
+        "type": "object",
+        "required": ["name"],
+        "additionalProperties": false,
+        "properties": {
+            "name": {
+                "type": "string",
+                "enum": ["discussion", "planning"]
+            }
+        }
+    }));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::UnexpectedSchemaType
+    );
+    assert!(
+        result.state.diagnostics[0]
+            .message
+            .contains("allowed values: \"discussion\", \"planning\"")
     );
 }

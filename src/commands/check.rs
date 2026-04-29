@@ -8,6 +8,7 @@ use std::{
 use serde::Deserialize;
 use smoothe::config::{ResolvedCheckOptions, ResolvedGlobalOptions, SemanticInput};
 use smoothe::content::{ContentInput, process as process_template};
+use smoothe::context_schema::{ContextSchema, ContextShape, PathResolution, SectionScope};
 use smoothe::parser::{
     Ast, Diagnostic, DiagnosticSeverity, IssueKind, Node, SourceLocation, SourceMetadata,
     SourceSpan, TemplateUnit,
@@ -101,21 +102,6 @@ fn semantic_input(value: Option<&str>) -> Option<SemanticInput> {
     })
 }
 
-#[derive(Debug)]
-struct ContextSchema {
-    root: serde_json::Value,
-}
-
-impl ContextSchema {
-    fn new(root: serde_json::Value) -> Self {
-        Self { root }
-    }
-
-    fn root(&self) -> &serde_json::Value {
-        &self.root
-    }
-}
-
 fn load_schema(input: &SemanticInput) -> (Option<ContextSchema>, Vec<Diagnostic>) {
     let SemanticInput::Path(path) = input else {
         return (None, Vec::new());
@@ -137,7 +123,9 @@ fn load_schema(input: &SemanticInput) -> (Option<ContextSchema>, Vec<Diagnostic>
 
     match serde_json::from_str::<serde_json::Value>(&source) {
         Ok(schema) if is_recognisable_schema(&schema) => {
-            (Some(ContextSchema::new(schema)), Vec::new())
+            let schema = ContextSchema::from_json(schema, path.display().to_string());
+            let diagnostics = schema.diagnostics().to_vec();
+            (Some(schema), diagnostics)
         }
         Ok(_) => (
             None,
@@ -159,9 +147,20 @@ fn load_schema(input: &SemanticInput) -> (Option<ContextSchema>, Vec<Diagnostic>
 }
 
 fn is_recognisable_schema(schema: &serde_json::Value) -> bool {
-    schema
-        .as_object()
-        .is_some_and(|object| object.contains_key("type") || object.contains_key("properties"))
+    schema.as_object().is_some_and(|object| {
+        object.contains_key("type")
+            || object.contains_key("properties")
+            || object.contains_key("items")
+            || object.contains_key("enum")
+            || object.contains_key("additionalProperties")
+            || object.contains_key("$ref")
+            || object.contains_key("$defs")
+            || object.contains_key("definitions")
+            || object.contains_key("oneOf")
+            || object.contains_key("anyOf")
+            || object.contains_key("allOf")
+            || object.contains_key("patternProperties")
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,7 +259,7 @@ fn validate_semantics(
 
 struct SemanticValidation<'a> {
     template_units: &'a [TemplateUnit],
-    scope_schema: Option<&'a serde_json::Value>,
+    scope_schema: Option<&'a ContextShape>,
     lambdas: &'a HashMap<String, LambdaDefinition>,
     diagnostics: Vec<Diagnostic>,
     in_progress_template_units: HashSet<usize>,
@@ -399,21 +398,40 @@ impl SemanticValidation<'_> {
             return;
         }
 
-        let resolved_scope = resolve_schema_path(self.scope_schema, name);
-        if resolved_scope.is_none() {
-            self.validate_schema_path(source, source_name, name, span);
-        } else if !supports_section_scope(resolved_scope) {
-            self.diagnostics.push(source_diagnostic(
-                IssueKind::UnexpectedSchemaType,
-                source,
-                source_name,
-                span,
-                format!("schema path `{name}` is not valid as a section"),
-            ));
-        }
-
         let previous_scope = self.scope_schema;
-        self.scope_schema = section_scope(resolved_scope.or(self.scope_schema));
+        if let Some(schema) = self.scope_schema {
+            match schema.section_scope(name) {
+                SectionScope::Changed {
+                    shape: next_scope,
+                    optional,
+                } => {
+                    self.warn_optional_path(source, source_name, name, span, optional);
+                    self.scope_schema = Some(next_scope);
+                }
+                SectionScope::Current { optional } => {
+                    self.warn_optional_path(source, source_name, name, span, optional);
+                }
+                SectionScope::Invalid { shape, optional } => {
+                    self.warn_optional_path(source, source_name, name, span, optional);
+                    self.diagnostics.push(source_diagnostic(
+                        IssueKind::UnexpectedSchemaType,
+                        source,
+                        source_name,
+                        span,
+                        invalid_section_message(name, shape),
+                    ));
+                }
+                SectionScope::Missing {
+                    missing_path,
+                    known_fields,
+                } => self.warn_missing_path(source, source_name, span, &missing_path, known_fields),
+                SectionScope::Permissive { .. } => {}
+                SectionScope::InvalidTraversal {
+                    traversed_path,
+                    shape,
+                } => self.warn_invalid_traversal(source, source_name, span, &traversed_path, shape),
+            }
+        }
         self.validate_nodes(source, source_name, children);
         self.scope_schema = previous_scope;
     }
@@ -428,60 +446,82 @@ impl SemanticValidation<'_> {
         let Some(schema) = self.scope_schema else {
             return;
         };
-        if name == "." || resolve_schema_path(Some(schema), name).is_some() {
-            return;
+        match schema.resolve_path(name) {
+            PathResolution::Found { optional, .. } => {
+                self.warn_optional_path(source, source_name, name, span, optional);
+            }
+            PathResolution::Missing {
+                missing_path,
+                known_fields,
+            } => self.warn_missing_path(source, source_name, span, &missing_path, known_fields),
+            PathResolution::Permissive { .. } => {}
+            PathResolution::InvalidTraversal {
+                traversed_path,
+                shape,
+            } => self.warn_invalid_traversal(source, source_name, span, &traversed_path, shape),
+        }
+    }
+
+    fn warn_missing_path(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        span: &std::ops::Range<usize>,
+        missing_path: &str,
+        known_fields: Vec<String>,
+    ) {
+        let mut message = format!("missing schema path `{missing_path}`");
+        if !known_fields.is_empty() {
+            message.push_str(&format!("; known fields: {}", known_fields.join(", ")));
         }
         self.diagnostics.push(source_diagnostic(
             IssueKind::MissingSchemaPath,
             source,
             source_name,
             span,
-            format!("missing schema path `{name}`"),
+            message,
         ));
     }
-}
 
-fn resolve_schema_path<'a>(
-    schema: Option<&'a serde_json::Value>,
-    path: &str,
-) -> Option<&'a serde_json::Value> {
-    let mut current = schema?;
-    for segment in path.split('.') {
-        if segment.is_empty() {
-            return None;
-        }
-        current = property_schema(current, segment)?;
+    fn warn_optional_path(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        name: &str,
+        span: &std::ops::Range<usize>,
+        optional: Option<String>,
+    ) {
+        let Some(optional_path) = optional else {
+            return;
+        };
+        self.diagnostics.push(source_diagnostic(
+            IssueKind::OptionalSchemaPath,
+            source,
+            source_name,
+            span,
+            format!("schema path `{name}` depends on optional field `{optional_path}`"),
+        ));
     }
-    Some(current)
-}
 
-fn property_schema<'a>(
-    schema: &'a serde_json::Value,
-    property: &str,
-) -> Option<&'a serde_json::Value> {
-    schema
-        .get("properties")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|properties| properties.get(property))
-}
-
-fn section_scope(schema: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
-    let schema = schema?;
-    match schema.get("type").and_then(serde_json::Value::as_str) {
-        Some("array") => schema.get("items").or(Some(schema)),
-        Some("object") => Some(schema),
-        _ => Some(schema),
+    fn warn_invalid_traversal(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        span: &std::ops::Range<usize>,
+        traversed_path: &str,
+        shape: &ContextShape,
+    ) {
+        self.diagnostics.push(source_diagnostic(
+            IssueKind::InvalidSchemaTraversal,
+            source,
+            source_name,
+            span,
+            format!(
+                "schema path `{traversed_path}` cannot be traversed because it is {}",
+                shape_description(shape)
+            ),
+        ));
     }
-}
-
-fn supports_section_scope(schema: Option<&serde_json::Value>) -> bool {
-    let Some(schema) = schema else {
-        return true;
-    };
-    matches!(
-        schema.get("type").and_then(serde_json::Value::as_str),
-        Some("object") | Some("array") | Some("boolean")
-    )
 }
 
 fn source_diagnostic(
@@ -498,6 +538,35 @@ fn source_diagnostic(
         location: SourceLocation::for_offset(source, span.start),
         span: SourceSpan::new(span.start, span.end),
         message,
+    }
+}
+
+fn invalid_section_message(name: &str, shape: &ContextShape) -> String {
+    let mut message = format!(
+        "schema path `{name}` is not valid as a section because it is {}",
+        shape_description(shape)
+    );
+    if let ContextShape::Scalar { enum_values, .. } = shape
+        && !enum_values.is_empty()
+    {
+        let values = enum_values
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!("; allowed values: {values}"));
+    }
+    message
+}
+
+fn shape_description(shape: &ContextShape) -> String {
+    match shape {
+        ContextShape::Object(_) => "object".to_owned(),
+        ContextShape::Array(_) => "array".to_owned(),
+        ContextShape::Scalar { kind, .. } => format!("{} scalar", kind.as_str()),
+        ContextShape::Any => "any value".to_owned(),
+        ContextShape::Unknown => "unknown schema shape".to_owned(),
+        ContextShape::Unsupported => "unsupported schema shape".to_owned(),
     }
 }
 
