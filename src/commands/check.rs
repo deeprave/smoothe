@@ -10,8 +10,8 @@ use smoothe::content::{ContentInput, process as process_template};
 use smoothe::context_schema::{ContextSchema, ContextShape, PathResolution, SectionScope};
 use smoothe::lambda::{LambdaSideEffects, LambdaSpec, LambdaUsage};
 use smoothe::parser::{
-    Ast, Diagnostic, DiagnosticSeverity, IssueKind, Node, SourceLocation, SourceMetadata,
-    SourceSpan, TemplateUnit,
+    Ast, Diagnostic, DiagnosticSeverity, DiagnosticSuggestionKind, IssueKind, Node, SourceLocation,
+    SourceMetadata, SourceSpan, TemplateUnit, near_hit_suggestions,
 };
 
 use crate::cli::CheckArgs;
@@ -323,14 +323,14 @@ fn lambda_shape(
 }
 
 fn input_diagnostic(issue: IssueKind, path: &Path, message: String) -> Diagnostic {
-    Diagnostic {
-        severity: DiagnosticSeverity::Warning,
+    Diagnostic::new(
+        DiagnosticSeverity::Warning,
         issue,
-        source_name: path.display().to_string(),
-        location: SourceLocation { line: 1, column: 1 },
-        span: SourceSpan::new(0, 0),
+        path.display().to_string(),
+        SourceLocation { line: 1, column: 1 },
+        SourceSpan::new(0, 0),
         message,
-    }
+    )
 }
 
 fn validate_semantics(
@@ -442,13 +442,7 @@ impl SemanticValidation<'_> {
     ) {
         if let Some(lambda) = self.lambdas.get(name) {
             if !lambda.usage.allows_variable() {
-                self.diagnostics.push(source_diagnostic(
-                    IssueKind::InvalidLambdaUsage,
-                    source,
-                    source_name,
-                    span,
-                    format!("lambda `{name}` is not valid as a variable"),
-                ));
+                self.warn_invalid_lambda_usage(source, source_name, name, span, lambda, "variable");
             }
             self.warn_incompatible_variable_return(source, source_name, name, span, lambda);
             return;
@@ -466,13 +460,7 @@ impl SemanticValidation<'_> {
     ) {
         if let Some(lambda) = self.lambdas.get(name) {
             if !lambda.usage.allows_section() {
-                self.diagnostics.push(source_diagnostic(
-                    IssueKind::InvalidLambdaUsage,
-                    source,
-                    source_name,
-                    span,
-                    format!("lambda `{name}` is not valid as a section"),
-                ));
+                self.warn_invalid_lambda_usage(source, source_name, name, span, lambda, "section");
             }
             self.warn_incompatible_section_shapes(source, source_name, name, span, lambda);
             self.validate_nodes(source, source_name, children);
@@ -494,18 +482,36 @@ impl SemanticValidation<'_> {
                 }
                 SectionScope::Invalid { shape, optional } => {
                     self.warn_optional_path(source, source_name, name, span, optional);
-                    self.diagnostics.push(source_diagnostic(
-                        IssueKind::UnexpectedSchemaType,
-                        source,
-                        source_name,
-                        span,
-                        invalid_section_message(name, shape),
-                    ));
+                    self.diagnostics.push(
+                        source_diagnostic(
+                            IssueKind::UnexpectedSchemaType,
+                            source,
+                            source_name,
+                            span,
+                            invalid_section_message(name, shape),
+                        )
+                        .with_expected("object, array, boolean, lambda, or permissive section")
+                        .with_found(shape_description(shape))
+                        .with_expectation_source("context schema")
+                        .with_suggestions(enum_value_suggestions(shape)),
+                    );
                 }
                 SectionScope::Missing {
                     missing_path,
                     known_fields,
-                } => self.warn_missing_path(source, source_name, span, &missing_path, known_fields),
+                } => {
+                    self.warn_missing_path_with_note(
+                        source,
+                        source_name,
+                        span,
+                        &missing_path,
+                        known_fields,
+                        format!(
+                            "references inside unknown section `{name}` were not fully validated"
+                        ),
+                    );
+                    return;
+                }
                 SectionScope::Permissive { .. } => {}
                 SectionScope::InvalidTraversal {
                     traversed_path,
@@ -526,13 +532,7 @@ impl SemanticValidation<'_> {
     ) {
         if let Some(lambda) = self.lambdas.get(name) {
             if !lambda.usage.allows_variable() {
-                self.diagnostics.push(source_diagnostic(
-                    IssueKind::InvalidLambdaUsage,
-                    source,
-                    source_name,
-                    span,
-                    format!("lambda `{name}` is not valid as a variable"),
-                ));
+                self.warn_invalid_lambda_usage(source, source_name, name, span, lambda, "variable");
             }
             self.warn_incompatible_variable_return(source, source_name, name, span, lambda);
         }
@@ -547,16 +547,34 @@ impl SemanticValidation<'_> {
     ) {
         if let Some(lambda) = self.lambdas.get(name) {
             if !lambda.usage.allows_section() {
-                self.diagnostics.push(source_diagnostic(
-                    IssueKind::InvalidLambdaUsage,
-                    source,
-                    source_name,
-                    span,
-                    format!("lambda `{name}` is not valid as a section"),
-                ));
+                self.warn_invalid_lambda_usage(source, source_name, name, span, lambda, "section");
             }
             self.warn_incompatible_section_shapes(source, source_name, name, span, lambda);
         }
+    }
+
+    fn warn_invalid_lambda_usage(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        name: &str,
+        span: &std::ops::Range<usize>,
+        lambda: &LambdaSpec,
+        actual_usage: &str,
+    ) {
+        self.diagnostics.push(
+            source_diagnostic(
+                IssueKind::InvalidLambdaUsage,
+                source,
+                source_name,
+                span,
+                format!("lambda `{name}` is not valid as a {actual_usage}"),
+            )
+            .with_expected(format!("{} lambda usage", lambda.usage.as_str()))
+            .with_found(format!("{actual_usage} lambda usage"))
+            .with_expectation_source("lambda definitions")
+            .with_note(format!("side effects: {}", lambda.side_effects.as_str())),
+        );
     }
 
     fn warn_incompatible_variable_return(
@@ -573,16 +591,22 @@ impl SemanticValidation<'_> {
         if shape_renders_as_scalar(returns) {
             return;
         }
-        self.diagnostics.push(source_diagnostic(
-            IssueKind::LambdaTypeMismatch,
-            source,
-            source_name,
-            span,
-            format!(
-                "lambda `{name}` return shape is incompatible with variable usage: {}",
-                shape_description(returns)
-            ),
-        ));
+        self.diagnostics.push(
+            source_diagnostic(
+                IssueKind::LambdaTypeMismatch,
+                source,
+                source_name,
+                span,
+                format!(
+                    "lambda `{name}` return shape is incompatible with variable usage: {}",
+                    shape_description(returns)
+                ),
+            )
+            .with_expected("scalar-renderable return shape")
+            .with_found(shape_description(returns))
+            .with_expectation_source("lambda definitions")
+            .with_note(format!("side effects: {}", lambda.side_effects.as_str())),
+        );
     }
 
     fn warn_incompatible_section_shapes(
@@ -596,16 +620,22 @@ impl SemanticValidation<'_> {
         if let Some(argument) = &lambda.argument
             && !shape_accepts_section_argument(argument)
         {
-            self.diagnostics.push(source_diagnostic(
-                IssueKind::LambdaTypeMismatch,
-                source,
-                source_name,
-                span,
-                format!(
-                    "lambda `{name}` argument shape is incompatible with section usage: {}",
-                    shape_description(argument)
-                ),
-            ));
+            self.diagnostics.push(
+                source_diagnostic(
+                    IssueKind::LambdaTypeMismatch,
+                    source,
+                    source_name,
+                    span,
+                    format!(
+                        "lambda `{name}` argument shape is incompatible with section usage: {}",
+                        shape_description(argument)
+                    ),
+                )
+                .with_expected("string section argument")
+                .with_found(shape_description(argument))
+                .with_expectation_source("lambda definitions")
+                .with_note(format!("side effects: {}", lambda.side_effects.as_str())),
+            );
         }
 
         let Some(returns) = &lambda.returns else {
@@ -614,16 +644,22 @@ impl SemanticValidation<'_> {
         if shape_renders_as_scalar(returns) {
             return;
         }
-        self.diagnostics.push(source_diagnostic(
-            IssueKind::LambdaTypeMismatch,
-            source,
-            source_name,
-            span,
-            format!(
-                "lambda `{name}` return shape is incompatible with section usage: {}",
-                shape_description(returns)
-            ),
-        ));
+        self.diagnostics.push(
+            source_diagnostic(
+                IssueKind::LambdaTypeMismatch,
+                source,
+                source_name,
+                span,
+                format!(
+                    "lambda `{name}` return shape is incompatible with section usage: {}",
+                    shape_description(returns)
+                ),
+            )
+            .with_expected("scalar-renderable return shape")
+            .with_found(shape_description(returns))
+            .with_expectation_source("lambda definitions")
+            .with_note(format!("side effects: {}", lambda.side_effects.as_str())),
+        );
     }
 
     fn validate_schema_path(
@@ -664,13 +700,48 @@ impl SemanticValidation<'_> {
         if !known_fields.is_empty() {
             message.push_str(&format!("; known fields: {}", known_fields.join(", ")));
         }
-        self.diagnostics.push(source_diagnostic(
-            IssueKind::MissingSchemaPath,
-            source,
-            source_name,
-            span,
-            message,
-        ));
+        self.diagnostics.push(
+            source_diagnostic(
+                IssueKind::MissingSchemaPath,
+                source,
+                source_name,
+                span,
+                message,
+            )
+            .with_expected(schema_fields_expectation(&known_fields))
+            .with_found(missing_path)
+            .with_expectation_source("context schema")
+            .with_suggestions(schema_field_suggestions(missing_path, &known_fields)),
+        );
+    }
+
+    fn warn_missing_path_with_note(
+        &mut self,
+        source: &str,
+        source_name: &str,
+        span: &std::ops::Range<usize>,
+        missing_path: &str,
+        known_fields: Vec<String>,
+        note: String,
+    ) {
+        let mut message = format!("missing schema path `{missing_path}`");
+        if !known_fields.is_empty() {
+            message.push_str(&format!("; known fields: {}", known_fields.join(", ")));
+        }
+        self.diagnostics.push(
+            source_diagnostic(
+                IssueKind::MissingSchemaPath,
+                source,
+                source_name,
+                span,
+                message,
+            )
+            .with_expected(schema_fields_expectation(&known_fields))
+            .with_found(missing_path)
+            .with_expectation_source("context schema")
+            .with_note(note)
+            .with_suggestions(schema_field_suggestions(missing_path, &known_fields)),
+        );
     }
 
     fn warn_optional_path(
@@ -684,13 +755,18 @@ impl SemanticValidation<'_> {
         let Some(optional_path) = optional else {
             return;
         };
-        self.diagnostics.push(source_diagnostic(
-            IssueKind::OptionalSchemaPath,
-            source,
-            source_name,
-            span,
-            format!("schema path `{name}` depends on optional field `{optional_path}`"),
-        ));
+        self.diagnostics.push(
+            source_diagnostic(
+                IssueKind::OptionalSchemaPath,
+                source,
+                source_name,
+                span,
+                format!("schema path `{name}` depends on optional field `{optional_path}`"),
+            )
+            .with_expected("required schema path")
+            .with_found(format!("optional schema path `{optional_path}`"))
+            .with_expectation_source("context schema"),
+        );
     }
 
     fn warn_invalid_traversal(
@@ -701,16 +777,21 @@ impl SemanticValidation<'_> {
         traversed_path: &str,
         shape: &ContextShape,
     ) {
-        self.diagnostics.push(source_diagnostic(
-            IssueKind::InvalidSchemaTraversal,
-            source,
-            source_name,
-            span,
-            format!(
-                "schema path `{traversed_path}` cannot be traversed because it is {}",
-                shape_description(shape)
-            ),
-        ));
+        self.diagnostics.push(
+            source_diagnostic(
+                IssueKind::InvalidSchemaTraversal,
+                source,
+                source_name,
+                span,
+                format!(
+                    "schema path `{traversed_path}` cannot be traversed because it is {}",
+                    shape_description(shape)
+                ),
+            )
+            .with_expected("traversable object path")
+            .with_found(shape_description(shape))
+            .with_expectation_source("context schema"),
+        );
     }
 }
 
@@ -739,14 +820,14 @@ fn source_diagnostic_with_severity(
     span: &std::ops::Range<usize>,
     message: String,
 ) -> Diagnostic {
-    Diagnostic {
+    Diagnostic::new(
         severity,
         issue,
-        source_name: source_name.to_owned(),
-        location: SourceLocation::for_offset(source, span.start),
-        span: SourceSpan::new(span.start, span.end),
+        source_name,
+        SourceLocation::for_offset(source, span.start),
+        SourceSpan::new(span.start, span.end),
         message,
-    }
+    )
 }
 
 fn invalid_section_message(name: &str, shape: &ContextShape) -> String {
@@ -801,7 +882,7 @@ fn shape_renders_as_scalar(shape: &ContextShape) -> bool {
 }
 
 pub(crate) fn format_diagnostic(diagnostic: &Diagnostic) -> String {
-    format!(
+    let mut output = format!(
         "{} {:?} at {}:{}:{}: {}",
         severity_label(diagnostic.severity),
         diagnostic.issue,
@@ -809,7 +890,69 @@ pub(crate) fn format_diagnostic(diagnostic: &Diagnostic) -> String {
         diagnostic.location.line,
         diagnostic.location.column,
         diagnostic.message
+    );
+    append_diagnostic_details(&mut output, diagnostic);
+    output
+}
+
+fn append_diagnostic_details(output: &mut String, diagnostic: &Diagnostic) {
+    if let Some(expected) = &diagnostic.details.expected {
+        output.push_str(&format!("; expected: {expected}"));
+    }
+    if let Some(found) = &diagnostic.details.found {
+        output.push_str(&format!("; found: {found}"));
+    }
+    if let Some(source) = &diagnostic.details.expectation_source {
+        output.push_str(&format!("; source: {source}"));
+    }
+    if !diagnostic.details.notes.is_empty() {
+        output.push_str(&format!("; notes: {}", diagnostic.details.notes.join("; ")));
+    }
+    if !diagnostic.details.suggestions.is_empty() {
+        let suggestions = diagnostic
+            .details
+            .suggestions
+            .iter()
+            .map(|suggestion| suggestion.value.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(&format!("; suggestions: {suggestions}"));
+    }
+}
+
+fn schema_fields_expectation(known_fields: &[String]) -> String {
+    if known_fields.is_empty() {
+        "defined schema path".to_owned()
+    } else {
+        format!("one of schema fields {}", known_fields.join(", "))
+    }
+}
+
+fn schema_field_suggestions(
+    missing_path: &str,
+    known_fields: &[String],
+) -> Vec<smoothe::parser::DiagnosticSuggestion> {
+    let target = missing_path.rsplit('.').next().unwrap_or(missing_path);
+    near_hit_suggestions(
+        target,
+        known_fields,
+        DiagnosticSuggestionKind::SchemaField,
+        3,
     )
+}
+
+fn enum_value_suggestions(shape: &ContextShape) -> Vec<smoothe::parser::DiagnosticSuggestion> {
+    let ContextShape::Scalar { enum_values, .. } = shape else {
+        return Vec::new();
+    };
+
+    enum_values
+        .iter()
+        .map(serde_json::Value::to_string)
+        .map(|value| {
+            smoothe::parser::DiagnosticSuggestion::new(DiagnosticSuggestionKind::SchemaValue, value)
+        })
+        .collect()
 }
 
 fn severity_label(severity: DiagnosticSeverity) -> &'static str {

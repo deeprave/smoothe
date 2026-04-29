@@ -200,6 +200,18 @@ struct JsonDiagnostic {
     column: usize,
     span: JsonSpan,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    found: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expectation_source: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    suggestions: Vec<JsonDiagnosticSuggestion>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    related_locations: Vec<JsonRelatedLocation>,
 }
 
 impl From<&Diagnostic> for JsonDiagnostic {
@@ -211,6 +223,58 @@ impl From<&Diagnostic> for JsonDiagnostic {
             column: diagnostic.location.column,
             span: JsonSpan::from(diagnostic.span),
             message: diagnostic.message.clone(),
+            expected: diagnostic.details.expected.clone(),
+            found: diagnostic.details.found.clone(),
+            expectation_source: diagnostic.details.expectation_source.clone(),
+            notes: diagnostic.details.notes.clone(),
+            suggestions: diagnostic
+                .details
+                .suggestions
+                .iter()
+                .map(JsonDiagnosticSuggestion::from)
+                .collect(),
+            related_locations: diagnostic
+                .details
+                .related_locations
+                .iter()
+                .map(JsonRelatedLocation::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonDiagnosticSuggestion {
+    kind: String,
+    value: String,
+}
+
+impl From<&smoothe::parser::DiagnosticSuggestion> for JsonDiagnosticSuggestion {
+    fn from(suggestion: &smoothe::parser::DiagnosticSuggestion) -> Self {
+        Self {
+            kind: suggestion.kind.as_str().to_owned(),
+            value: suggestion.value.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct JsonRelatedLocation {
+    source: String,
+    line: usize,
+    column: usize,
+    span: JsonSpan,
+    message: String,
+}
+
+impl From<&smoothe::parser::RelatedLocation> for JsonRelatedLocation {
+    fn from(location: &smoothe::parser::RelatedLocation) -> Self {
+        Self {
+            source: location.source_name.clone(),
+            line: location.location.line,
+            column: location.location.column,
+            span: JsonSpan::from(location.span),
+            message: location.message.clone(),
         }
     }
 }

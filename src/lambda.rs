@@ -72,3 +72,13 @@ pub enum LambdaSideEffects {
     Declared,
     Unknown,
 }
+
+impl LambdaSideEffects {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Declared => "declared",
+            Self::Unknown => "unknown",
+        }
+    }
+}

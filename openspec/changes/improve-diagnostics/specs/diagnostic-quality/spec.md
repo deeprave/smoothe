@@ -41,11 +41,10 @@ set is available.
 - **THEN** the diagnostic includes a bounded suggestion list containing nearby
   field names.
 
-#### Scenario: Lambda name suggestion is available
+#### Scenario: Lambda name suggestions are not inferred speculatively
 
-- **WHEN** an unknown lambda name is close to a known lambda definition
-- **THEN** the diagnostic includes a bounded suggestion list containing nearby
-  lambda names.
+- **WHEN** ordinary Mustache syntax does not identify a reference as a lambda
+- **THEN** the system does not emit speculative lambda name suggestions.
 
 #### Scenario: Partial name suggestion is available
 

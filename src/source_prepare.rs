@@ -64,14 +64,14 @@ pub fn prepare_source(source: &str, source_name: &str) -> PreparedSource {
             frontmatter: FrontmatterState::default(),
             body_offset: frontmatter.body_offset,
             body_start_line,
-            diagnostics: vec![Diagnostic {
-                severity: DiagnosticSeverity::Warning,
-                issue: IssueKind::FrontmatterParseError,
-                source_name: source_name.to_owned(),
-                location: SourceLocation::for_offset(source, 0),
-                span: SourceSpan::new(0, frontmatter.body_offset),
+            diagnostics: vec![Diagnostic::new(
+                DiagnosticSeverity::Warning,
+                IssueKind::FrontmatterParseError,
+                source_name,
+                SourceLocation::for_offset(source, 0),
+                SourceSpan::new(0, frontmatter.body_offset),
                 message,
-            }],
+            )],
         },
     }
 }

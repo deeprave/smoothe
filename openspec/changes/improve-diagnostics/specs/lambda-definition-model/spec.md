@@ -21,19 +21,20 @@ The system SHALL expose lambda definition context needed for rich diagnostics.
   side-effect metadata
 - **THEN** the diagnostic can include that side-effect metadata.
 
-### Requirement: Lambda Near-Hit Candidates
+### Requirement: Lambda Suggestion Boundaries
 
-The system SHALL provide known lambda names as candidates for near-hit
-suggestions.
+The system SHALL avoid speculative lambda suggestions when no diagnostic can
+reliably identify a reference as an unknown lambda.
 
-#### Scenario: Unknown lambda suggests nearby known names
+#### Scenario: Ordinary references do not receive lambda suggestions
 
-- **WHEN** an unknown lambda diagnostic is emitted and nearby known lambda names
-  exist
-- **THEN** the diagnostic includes those nearby lambda names as suggestions.
-
-#### Scenario: No nearby lambda names omits suggestions
-
-- **WHEN** an unknown lambda diagnostic is emitted and no nearby known lambda
-  names exist
+- **WHEN** a template reference does not match a supplied lambda definition
+- **AND** ordinary Mustache syntax cannot distinguish it from a context
+  variable
 - **THEN** the diagnostic omits lambda name suggestions.
+
+#### Scenario: Known lambda diagnostics use definition context
+
+- **WHEN** validation emits a diagnostic for a known lambda
+- **THEN** the diagnostic uses that lambda definition for expected usage,
+  actual usage, shape context, and side-effect metadata.

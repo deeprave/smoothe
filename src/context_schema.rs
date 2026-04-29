@@ -453,14 +453,14 @@ impl SchemaConverter {
     }
 
     fn warn(&mut self, message: String) {
-        self.diagnostics.push(Diagnostic {
-            severity: DiagnosticSeverity::Warning,
-            issue: IssueKind::SchemaInputError,
-            source_name: self.source_name.clone(),
-            location: SourceLocation { line: 1, column: 1 },
-            span: SourceSpan::new(0, 0),
+        self.diagnostics.push(Diagnostic::new(
+            DiagnosticSeverity::Warning,
+            IssueKind::SchemaInputError,
+            self.source_name.clone(),
+            SourceLocation { line: 1, column: 1 },
+            SourceSpan::new(0, 0),
             message,
-        });
+        ));
     }
 }
 

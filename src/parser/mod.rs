@@ -9,7 +9,10 @@ use crate::context_schema::{ContextSchema, ContextShape, PathResolution, Section
 use crate::source_prepare::prepare_source;
 
 pub use ast::{Ast, Delimiters, Node, TemplateName, TemplateUnit};
-pub use diagnostic::{Diagnostic, DiagnosticSeverity, IssueKind, ParseEvent};
+pub use diagnostic::{
+    Diagnostic, DiagnosticDetails, DiagnosticSeverity, DiagnosticSuggestion,
+    DiagnosticSuggestionKind, IssueKind, ParseEvent, RelatedLocation, near_hit_suggestions,
+};
 pub use input::{FeedbackHandlers, LambdaSpec, ParserInput, PartialMapping, SourceMetadata};
 pub use source::{SourceLocation, SourceSpan};
 
@@ -179,11 +182,21 @@ impl<'a> Parser<'a> {
             let tag = match self.parse_tag(open_offset) {
                 Some(tag) => tag,
                 None => {
-                    self.emit(
-                        DiagnosticSeverity::Error,
-                        IssueKind::MalformedTag,
-                        open_offset..self.source.len(),
-                        "malformed Mustache tag",
+                    self.emit_diagnostic(
+                        Diagnostic::new(
+                            DiagnosticSeverity::Error,
+                            IssueKind::MalformedTag,
+                            self.source_name.clone(),
+                            self.location_for_offset(open_offset),
+                            SourceSpan::new(open_offset, self.source.len()),
+                            "malformed Mustache tag",
+                        )
+                        .with_expected(format!(
+                            "closing delimiter `{}`",
+                            self.state.delimiters.close
+                        ))
+                        .with_found("end of input")
+                        .with_expectation_source("parser delimiters"),
                     );
                     break;
                 }
@@ -475,12 +488,29 @@ impl<'a> Parser<'a> {
             .find(|mapping| mapping.name == name)
             .cloned()
         else {
-            self.emit_for_context(
-                DiagnosticSeverity::Error,
-                IssueKind::UnresolvedPartial,
-                context,
-                span.clone(),
-                format!("unresolved partial `{name}`"),
+            let candidates = self
+                .partials
+                .iter()
+                .map(|mapping| mapping.name.clone())
+                .collect::<Vec<_>>();
+            self.emit_diagnostic(
+                Diagnostic::new(
+                    DiagnosticSeverity::Error,
+                    IssueKind::UnresolvedPartial,
+                    context.name.clone(),
+                    location_for_context(context, span.start),
+                    SourceSpan::new(span.start, span.end),
+                    format!("unresolved partial `{name}`"),
+                )
+                .with_expected(partial_mapping_expectation(&candidates))
+                .with_found(name)
+                .with_expectation_source("partial mappings")
+                .with_suggestions(near_hit_suggestions(
+                    name,
+                    &candidates,
+                    DiagnosticSuggestionKind::PartialName,
+                    3,
+                )),
             );
             return None;
         };
@@ -507,12 +537,18 @@ impl<'a> Parser<'a> {
             None => match self.parse_partial_unit(&mapping.name, &path, active_paths) {
                 Ok(template_id) => template_id,
                 Err(error) => {
-                    self.emit_for_context(
-                        DiagnosticSeverity::Error,
-                        IssueKind::UnresolvedPartial,
-                        context,
-                        span.clone(),
-                        format!("unresolved partial `{name}`: {error}"),
+                    self.emit_diagnostic(
+                        Diagnostic::new(
+                            DiagnosticSeverity::Error,
+                            IssueKind::UnresolvedPartial,
+                            context.name.clone(),
+                            location_for_context(context, span.start),
+                            SourceSpan::new(span.start, span.end),
+                            format!("unresolved partial `{name}`: {error}"),
+                        )
+                        .with_expected(format!("readable partial file {}", path.display()))
+                        .with_found(path.display().to_string())
+                        .with_expectation_source("partial mappings"),
                     );
                     return None;
                 }
@@ -684,12 +720,12 @@ impl<'a> Parser<'a> {
             .map(|lambda| lambda.name.clone())
             .collect::<HashSet<_>>();
 
-        self.check_schema_reference_nodes(&schema, &lambda_names, nodes);
+        self.check_schema_reference_nodes(schema.root(), &lambda_names, nodes);
     }
 
     fn check_schema_reference_nodes(
         &mut self,
-        schema: &ContextSchema,
+        schema: &ContextShape,
         lambda_names: &HashSet<String>,
         nodes: &[Node],
     ) {
@@ -707,13 +743,58 @@ impl<'a> Parser<'a> {
                     name,
                     span,
                     children,
+                } => {
+                    if lambda_names.contains(name) {
+                        self.check_schema_reference_nodes(schema, lambda_names, children);
+                        continue;
+                    }
+
+                    let mut child_schema = schema;
+                    match schema.section_scope(name) {
+                        SectionScope::Changed { shape, optional } => {
+                            self.emit_optional_schema_path(span, name, optional);
+                            child_schema = shape;
+                        }
+                        SectionScope::Current { optional } => {
+                            self.emit_optional_schema_path(span, name, optional);
+                        }
+                        SectionScope::Invalid { shape, optional } => {
+                            self.emit_optional_schema_path(span, name, optional);
+                            self.emit_unexpected_schema_type(span, name, shape);
+                        }
+                        SectionScope::Missing {
+                            missing_path,
+                            known_fields,
+                        } => {
+                            self.emit_missing_schema_path_with_note(
+                                span.start..span.end,
+                                &missing_path,
+                                known_fields,
+                                format!(
+                                    "references inside unknown section `{name}` were not fully validated"
+                                ),
+                            );
+                            continue;
+                        }
+                        SectionScope::Permissive { .. } => {}
+                        SectionScope::InvalidTraversal {
+                            traversed_path,
+                            shape,
+                        } => self.emit_invalid_schema_traversal(span, &traversed_path, shape),
+                    }
+                    self.check_schema_reference_nodes(child_schema, lambda_names, children);
                 }
-                | Node::InvertedSection {
+                Node::InvertedSection {
                     name,
                     span,
                     children,
+                } => {
+                    if !lambda_names.contains(name) {
+                        self.check_schema_path_reference(schema, name, span);
+                    }
+                    self.check_schema_reference_nodes(schema, lambda_names, children);
                 }
-                | Node::LambdaSection {
+                Node::LambdaSection {
                     name,
                     span,
                     children,
@@ -738,7 +819,7 @@ impl<'a> Parser<'a> {
 
     fn check_schema_path_reference(
         &mut self,
-        schema: &ContextSchema,
+        schema: &ContextShape,
         name: &str,
         span: &Range<usize>,
     ) {
@@ -746,12 +827,7 @@ impl<'a> Parser<'a> {
             PathResolution::Found {
                 optional: Some(optional_path),
                 ..
-            } => self.emit(
-                DiagnosticSeverity::Warning,
-                IssueKind::OptionalSchemaPath,
-                span.start..span.end,
-                format!("schema path `{name}` depends on optional field `{optional_path}`"),
-            ),
+            } => self.emit_optional_schema_path(span, name, Some(optional_path)),
             PathResolution::Missing {
                 missing_path,
                 known_fields,
@@ -759,51 +835,24 @@ impl<'a> Parser<'a> {
             PathResolution::InvalidTraversal {
                 traversed_path,
                 shape,
-            } => self.emit(
-                DiagnosticSeverity::Warning,
-                IssueKind::InvalidSchemaTraversal,
-                span.start..span.end,
-                format!(
-                    "schema path `{traversed_path}` cannot be traversed because it is {}",
-                    schema_shape_description(shape)
-                ),
-            ),
+            } => self.emit_invalid_schema_traversal(span, &traversed_path, shape),
             PathResolution::Found { .. } | PathResolution::Permissive { .. } => {}
         }
     }
 
     fn check_schema_section_reference(
         &mut self,
-        schema: &ContextSchema,
+        schema: &ContextShape,
         name: &str,
         span: &Range<usize>,
     ) {
         match schema.section_scope(name) {
             SectionScope::Changed { optional, .. } | SectionScope::Current { optional } => {
-                if let Some(optional_path) = optional {
-                    self.emit(
-                        DiagnosticSeverity::Warning,
-                        IssueKind::OptionalSchemaPath,
-                        span.start..span.end,
-                        format!("schema path `{name}` depends on optional field `{optional_path}`"),
-                    );
-                }
+                self.emit_optional_schema_path(span, name, optional);
             }
             SectionScope::Invalid { shape, optional } => {
-                if let Some(optional_path) = optional {
-                    self.emit(
-                        DiagnosticSeverity::Warning,
-                        IssueKind::OptionalSchemaPath,
-                        span.start..span.end,
-                        format!("schema path `{name}` depends on optional field `{optional_path}`"),
-                    );
-                }
-                self.emit(
-                    DiagnosticSeverity::Warning,
-                    IssueKind::UnexpectedSchemaType,
-                    span.start..span.end,
-                    invalid_schema_section_message(name, shape),
-                );
+                self.emit_optional_schema_path(span, name, optional);
+                self.emit_unexpected_schema_type(span, name, shape);
             }
             SectionScope::Missing {
                 missing_path,
@@ -813,7 +862,40 @@ impl<'a> Parser<'a> {
             SectionScope::InvalidTraversal {
                 traversed_path,
                 shape,
-            } => self.emit(
+            } => self.emit_invalid_schema_traversal(span, &traversed_path, shape),
+        }
+    }
+
+    fn emit_optional_schema_path(
+        &mut self,
+        span: &Range<usize>,
+        name: &str,
+        optional: Option<String>,
+    ) {
+        let Some(optional_path) = optional else {
+            return;
+        };
+        self.emit_diagnostic(
+            self.schema_diagnostic(
+                DiagnosticSeverity::Warning,
+                IssueKind::OptionalSchemaPath,
+                span.start..span.end,
+                format!("schema path `{name}` depends on optional field `{optional_path}`"),
+            )
+            .with_expected("required schema path")
+            .with_found(format!("optional schema path `{optional_path}`"))
+            .with_expectation_source("context schema"),
+        );
+    }
+
+    fn emit_invalid_schema_traversal(
+        &mut self,
+        span: &Range<usize>,
+        traversed_path: &str,
+        shape: &ContextShape,
+    ) {
+        self.emit_diagnostic(
+            self.schema_diagnostic(
                 DiagnosticSeverity::Warning,
                 IssueKind::InvalidSchemaTraversal,
                 span.start..span.end,
@@ -821,8 +903,31 @@ impl<'a> Parser<'a> {
                     "schema path `{traversed_path}` cannot be traversed because it is {}",
                     schema_shape_description(shape)
                 ),
-            ),
-        }
+            )
+            .with_expected("traversable object path")
+            .with_found(schema_shape_description(shape))
+            .with_expectation_source("context schema"),
+        );
+    }
+
+    fn emit_unexpected_schema_type(
+        &mut self,
+        span: &Range<usize>,
+        name: &str,
+        shape: &ContextShape,
+    ) {
+        self.emit_diagnostic(
+            self.schema_diagnostic(
+                DiagnosticSeverity::Warning,
+                IssueKind::UnexpectedSchemaType,
+                span.start..span.end,
+                invalid_schema_section_message(name, shape),
+            )
+            .with_expected("object, array, boolean, lambda, or permissive section")
+            .with_found(schema_shape_description(shape))
+            .with_expectation_source("context schema")
+            .with_suggestions(schema_value_suggestions(shape)),
+        );
     }
 
     fn emit_missing_schema_path(
@@ -831,16 +936,62 @@ impl<'a> Parser<'a> {
         missing_path: &str,
         known_fields: Vec<String>,
     ) {
+        self.emit_missing_schema_path_with_details(span, missing_path, known_fields, None);
+    }
+
+    fn emit_missing_schema_path_with_note(
+        &mut self,
+        span: Range<usize>,
+        missing_path: &str,
+        known_fields: Vec<String>,
+        note: String,
+    ) {
+        self.emit_missing_schema_path_with_details(span, missing_path, known_fields, Some(note));
+    }
+
+    fn emit_missing_schema_path_with_details(
+        &mut self,
+        span: Range<usize>,
+        missing_path: &str,
+        known_fields: Vec<String>,
+        note: Option<String>,
+    ) {
         let mut message = format!("missing schema path `{missing_path}`");
         if !known_fields.is_empty() {
             message.push_str(&format!("; known fields: {}", known_fields.join(", ")));
         }
-        self.emit(
-            DiagnosticSeverity::Warning,
-            IssueKind::MissingSchemaPath,
-            span,
+        let mut diagnostic = self
+            .schema_diagnostic(
+                DiagnosticSeverity::Warning,
+                IssueKind::MissingSchemaPath,
+                span,
+                message,
+            )
+            .with_expected(schema_fields_expectation(&known_fields))
+            .with_found(missing_path)
+            .with_expectation_source("context schema")
+            .with_suggestions(schema_field_suggestions(missing_path, &known_fields));
+        if let Some(note) = note {
+            diagnostic = diagnostic.with_note(note);
+        }
+        self.emit_diagnostic(diagnostic);
+    }
+
+    fn schema_diagnostic(
+        &self,
+        severity: DiagnosticSeverity,
+        issue: IssueKind,
+        span: Range<usize>,
+        message: impl Into<String>,
+    ) -> Diagnostic {
+        Diagnostic::new(
+            severity,
+            issue,
+            self.source_name.clone(),
+            self.location_for_offset(span.start),
+            SourceSpan::new(span.start, span.end),
             message,
-        );
+        )
     }
 
     fn record_lambda_references(&mut self, nodes: &[Node]) {
@@ -914,63 +1065,15 @@ impl<'a> Parser<'a> {
         span: Range<usize>,
         message: impl Into<String>,
     ) {
-        self.state.recovered = true;
-        let diagnostic = Diagnostic {
+        let diagnostic = Diagnostic::new(
             severity,
             issue,
-            source_name: self.source_name.clone(),
-            location: self.location_for_offset(span.start),
-            span: SourceSpan::new(span.start, span.end),
-            message: message.into(),
-        };
-        let event = ParseEvent {
-            diagnostic: diagnostic.clone(),
-        };
-
-        match diagnostic.severity {
-            DiagnosticSeverity::Error => {
-                if let Some(handler) = &self.feedback.on_error {
-                    handler(&event);
-                }
-            }
-            DiagnosticSeverity::Warning => {
-                if let Some(handler) = &self.feedback.on_warning {
-                    handler(&event);
-                }
-            }
-            DiagnosticSeverity::Info => {
-                if let Some(handler) = &self.feedback.on_info {
-                    handler(&event);
-                }
-            }
-            DiagnosticSeverity::Debug => {
-                if let Some(handler) = &self.feedback.on_debug {
-                    handler(&event);
-                }
-            }
-        }
-
-        self.state.diagnostics.push(diagnostic);
-    }
-
-    fn emit_for_context(
-        &mut self,
-        severity: DiagnosticSeverity,
-        issue: IssueKind,
-        context: &SourceContext,
-        span: Range<usize>,
-        message: impl Into<String>,
-    ) {
-        self.state.recovered = true;
-        let diagnostic = Diagnostic {
-            severity,
-            issue,
-            source_name: context.name.clone(),
-            location: location_for_context(context, span.start),
-            span: SourceSpan::new(span.start, span.end),
-            message: message.into(),
-        };
-        self.push_diagnostic(diagnostic);
+            self.source_name.clone(),
+            self.location_for_offset(span.start),
+            SourceSpan::new(span.start, span.end),
+            message,
+        );
+        self.emit_diagnostic(diagnostic);
     }
 
     fn extend_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
@@ -1011,6 +1114,11 @@ impl<'a> Parser<'a> {
         self.state.diagnostics.push(diagnostic);
     }
 
+    fn emit_diagnostic(&mut self, diagnostic: Diagnostic) {
+        self.state.recovered = true;
+        self.push_diagnostic(diagnostic);
+    }
+
     fn location_for_offset(&self, offset: usize) -> SourceLocation {
         if offset < self.body_offset {
             return SourceLocation::for_offset(self.source, offset);
@@ -1048,6 +1156,47 @@ fn location_for_context(context: &SourceContext, offset: usize) -> SourceLocatio
     let mut location = SourceLocation::for_offset(&context.source[context.body_offset..], relative);
     location.line += context.body_start_line.saturating_sub(1);
     location
+}
+
+fn partial_mapping_expectation(candidates: &[String]) -> String {
+    if candidates.is_empty() {
+        "configured partial mapping".to_owned()
+    } else {
+        format!("one of partial mappings {}", candidates.join(", "))
+    }
+}
+
+fn schema_fields_expectation(known_fields: &[String]) -> String {
+    if known_fields.is_empty() {
+        "defined schema path".to_owned()
+    } else {
+        format!("one of schema fields {}", known_fields.join(", "))
+    }
+}
+
+fn schema_field_suggestions(
+    missing_path: &str,
+    known_fields: &[String],
+) -> Vec<DiagnosticSuggestion> {
+    let target = missing_path.rsplit('.').next().unwrap_or(missing_path);
+    near_hit_suggestions(
+        target,
+        known_fields,
+        DiagnosticSuggestionKind::SchemaField,
+        3,
+    )
+}
+
+fn schema_value_suggestions(shape: &ContextShape) -> Vec<DiagnosticSuggestion> {
+    let ContextShape::Scalar { enum_values, .. } = shape else {
+        return Vec::new();
+    };
+
+    enum_values
+        .iter()
+        .map(serde_json::Value::to_string)
+        .map(|value| DiagnosticSuggestion::new(DiagnosticSuggestionKind::SchemaValue, value))
+        .collect()
 }
 
 #[derive(Debug, Clone)]

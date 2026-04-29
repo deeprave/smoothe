@@ -141,12 +141,12 @@ fn merge_explicit_partials(derived: &mut Vec<PartialMapping>, explicit: Vec<Part
 }
 
 fn unsupported_includes(source_name: &str) -> Diagnostic {
-    Diagnostic {
-        severity: DiagnosticSeverity::Warning,
-        issue: IssueKind::UnsupportedIncludes,
-        source_name: source_name.to_owned(),
-        location: SourceLocation { line: 1, column: 1 },
-        span: SourceSpan::new(0, 0),
-        message: "unsupported frontmatter `includes` value".to_owned(),
-    }
+    Diagnostic::new(
+        DiagnosticSeverity::Warning,
+        IssueKind::UnsupportedIncludes,
+        source_name,
+        SourceLocation { line: 1, column: 1 },
+        SourceSpan::new(0, 0),
+        "unsupported frontmatter `includes` value",
+    )
 }

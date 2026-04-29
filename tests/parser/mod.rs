@@ -8,8 +8,8 @@ use std::{
 
 use smoothe::lambda::LambdaUsage;
 use smoothe::parser::{
-    Diagnostic, DiagnosticSeverity, IssueKind, LambdaSpec, Node, ParseEvent, ParserInput,
-    PartialMapping, SourceMetadata, TemplateName, parse,
+    Diagnostic, DiagnosticSeverity, DiagnosticSuggestionKind, IssueKind, LambdaSpec, Node,
+    ParseEvent, ParserInput, PartialMapping, SourceMetadata, TemplateName, parse,
 };
 
 fn parse_template(source: &str) -> smoothe::parser::ParseResult {
@@ -653,6 +653,21 @@ fn warns_for_referenced_paths_missing_from_context_schema() {
         result.state.diagnostics[0].message,
         "missing schema path `user.email`; known fields: name"
     );
+    assert_eq!(
+        result.state.diagnostics[0].details.expected.as_deref(),
+        Some("one of schema fields name")
+    );
+    assert_eq!(
+        result.state.diagnostics[0].details.found.as_deref(),
+        Some("user.email")
+    );
+    assert_eq!(
+        result.state.diagnostics[0]
+            .details
+            .expectation_source
+            .as_deref(),
+        Some("context schema")
+    );
 }
 
 #[test]
@@ -755,5 +770,81 @@ fn warns_for_invalid_section_type_from_context_schema() {
         result.state.diagnostics[0]
             .message
             .contains("allowed values: \"discussion\", \"planning\"")
+    );
+    assert_eq!(
+        result.state.diagnostics[0].details.expected.as_deref(),
+        Some("object, array, boolean, lambda, or permissive section")
+    );
+    assert_eq!(
+        result.state.diagnostics[0].details.found.as_deref(),
+        Some("string scalar")
+    );
+    assert!(
+        result.state.diagnostics[0]
+            .details
+            .suggestions
+            .iter()
+            .all(|suggestion| suggestion.kind == DiagnosticSuggestionKind::SchemaValue)
+    );
+}
+
+#[test]
+fn parser_context_schema_suggests_nearby_schema_fields() {
+    let mut input = ParserInput::new(SourceMetadata::new("template.mustache"), "{{user.nmae}}");
+    input.context_schema = Some(serde_json::json!({
+        "type": "object",
+        "required": ["user"],
+        "additionalProperties": false,
+        "properties": {
+            "user": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "name": { "type": "string" },
+                    "email": { "type": "string" }
+                }
+            }
+        }
+    }));
+
+    let result = parse(input);
+    let diagnostic = &result.state.diagnostics[0];
+
+    assert_eq!(diagnostic.issue, IssueKind::MissingSchemaPath);
+    assert_eq!(diagnostic.details.found.as_deref(), Some("user.nmae"));
+    assert!(diagnostic.details.suggestions.iter().any(|suggestion| {
+        suggestion.kind == DiagnosticSuggestionKind::SchemaField && suggestion.value == "name"
+    }));
+}
+
+#[test]
+fn parser_context_schema_suppresses_unknown_section_child_cascades() {
+    let mut input = ParserInput::new(
+        SourceMetadata::new("template.mustache"),
+        "{{#user}}{{name}}{{email}}{{/user}}",
+    );
+    input.context_schema = Some(serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "account": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        }
+    }));
+
+    let result = parse(input);
+
+    assert_eq!(result.state.diagnostics.len(), 1);
+    assert_eq!(
+        result.state.diagnostics[0].issue,
+        IssueKind::MissingSchemaPath
+    );
+    assert_eq!(
+        result.state.diagnostics[0].details.notes,
+        vec!["references inside unknown section `user` were not fully validated".to_owned()]
     );
 }

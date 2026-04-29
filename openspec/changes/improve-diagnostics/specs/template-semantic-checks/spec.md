@@ -33,11 +33,11 @@ when useful candidate sets are available.
   schema scope has nearby known fields
 - **THEN** the diagnostic includes those nearby field names as suggestions.
 
-#### Scenario: Lambda diagnostic suggests known lambda names
+#### Scenario: Lambda suggestions are omitted without an unknown-lambda signal
 
-- **WHEN** semantic validation emits an unknown-lambda diagnostic and nearby
-  lambda definitions are known
-- **THEN** the diagnostic includes those nearby lambda names as suggestions.
+- **WHEN** semantic validation cannot distinguish an unmatched reference from a
+  context variable
+- **THEN** the diagnostic omits speculative lambda name suggestions.
 
 #### Scenario: Suggestions are omitted without candidates
 

@@ -15,11 +15,11 @@ The system SHALL expose partial graph context needed for rich diagnostics.
 - **THEN** the diagnostic includes the mapped or resolved path that was
   attempted.
 
-#### Scenario: Partial cycle diagnostic includes related location
+#### Scenario: Recursive partial references are not reported as cycles
 
-- **WHEN** partial graph parsing reports a cycle
-- **THEN** the diagnostic can include related locations for the partial
-  references involved in the cycle.
+- **WHEN** a partial reference is recursive and the parser preserves it as a
+  recursive graph edge
+- **THEN** the system does not emit a speculative cycle diagnostic.
 
 ### Requirement: Partial Near-Hit Candidates
 

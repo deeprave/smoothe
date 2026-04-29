@@ -190,6 +190,59 @@ fn check_command_warns_for_unknown_schema_variable() {
 }
 
 #[test]
+fn check_command_suggests_nearby_schema_fields() {
+    let dir = temp_dir();
+    let template = write_template(&dir, "template.mustache", "Hello {{user.nmae}}");
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","additionalProperties":false,"properties":{"user":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"email":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("MissingSchemaPath"));
+    assert!(stderr.contains("expected: one of schema fields email, name"));
+    assert!(stderr.contains("found: user.nmae"));
+    assert!(stderr.contains("suggestions: name"));
+}
+
+#[test]
+fn check_command_suppresses_unknown_section_child_cascades() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "{{#user}}{{name}}{{email}}{{/user}}",
+    );
+    let schema = write_template(
+        &dir,
+        "context.json",
+        r#"{"type":"object","additionalProperties":false,"properties":{"account":{"type":"object","properties":{"name":{"type":"string"}}}}}"#,
+    );
+    let output = smoothe()
+        .arg("check")
+        .arg("--schema")
+        .arg(&schema)
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let stderr = stderr(&output);
+
+    assert!(output.status.success());
+    assert_eq!(stderr.matches("MissingSchemaPath").count(), 1);
+    assert!(stderr.contains("missing schema path `user`"));
+    assert!(stderr.contains("references inside unknown section `user` were not fully validated"));
+}
+
+#[test]
 fn check_command_validates_variables_inside_frontmatter_included_partials() {
     let dir = temp_dir();
     let partials = dir.join("_partials");
@@ -598,6 +651,8 @@ fn check_command_warns_for_incompatible_lambda_usage() {
     assert!(stderr.contains("warning"));
     assert!(stderr.contains("InvalidLambdaUsage"));
     assert!(stderr.contains("markdown"));
+    assert!(stderr.contains("expected: section lambda usage"));
+    assert!(stderr.contains("found: variable lambda usage"));
 }
 
 #[test]
@@ -653,7 +708,7 @@ fn check_command_warns_for_lambda_type_incompatibility() {
     let lambdas = write_template(
         &dir,
         "lambdas.json",
-        r#"{"lambdas":{"markdown":{"usage":"section","argument":{"type":"object"},"returns":{"type":"array"}}}}"#,
+        r#"{"lambdas":{"markdown":{"usage":"section","argument":{"type":"object"},"returns":{"type":"array"},"side_effects":"declared"}}}"#,
     );
     let output = smoothe()
         .arg("check")
@@ -669,6 +724,9 @@ fn check_command_warns_for_lambda_type_incompatibility() {
     assert!(stderr.contains("markdown"));
     assert!(stderr.contains("argument"));
     assert!(stderr.contains("return"));
+    assert!(stderr.contains("expected: string section argument"));
+    assert!(stderr.contains("found: object"));
+    assert!(stderr.contains("notes: side effects: declared"));
 }
 
 #[test]
@@ -778,6 +836,66 @@ fn parse_command_outputs_resolved_frontmatter_included_partials() {
     assert_eq!(
         json["inputs"][0]["ast"]["template_units"][0]["nodes"][1]["name"],
         "title"
+    );
+}
+
+#[test]
+fn parse_command_json_suggests_nearby_partial_names() {
+    let dir = temp_dir();
+    let partials = dir.join("_partials");
+    fs::create_dir(&partials).expect("create partials dir");
+    fs::write(partials.join("_header.mustache"), "Header").expect("write partial");
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "---\nincludes:\n  - _partials/header.mustache\n---\n{{> hedaer}}",
+    );
+    let output = smoothe()
+        .arg("parse")
+        .arg("--json")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+    let diagnostic = &json["inputs"][0]["errors"][0];
+
+    assert!(!output.status.success());
+    assert_eq!(diagnostic["issue"], "UnresolvedPartial");
+    assert_eq!(diagnostic["found"], "hedaer");
+    assert_eq!(diagnostic["suggestions"][0]["kind"], "partial_name");
+    assert_eq!(diagnostic["suggestions"][0]["value"], "header");
+}
+
+#[test]
+fn parse_command_json_reports_unreadable_partial_paths() {
+    let dir = temp_dir();
+    let template = write_template(
+        &dir,
+        "template.mustache",
+        "---\nincludes:\n  - _partials/missing.mustache\n---\n{{> missing}}",
+    );
+    let output = smoothe()
+        .arg("parse")
+        .arg("--json")
+        .arg(&template)
+        .output()
+        .expect("run smoothe");
+    let json = json_stdout(&output);
+    let diagnostic = &json["inputs"][0]["errors"][0];
+
+    assert!(!output.status.success());
+    assert_eq!(diagnostic["issue"], "UnresolvedPartial");
+    assert!(
+        diagnostic["expected"]
+            .as_str()
+            .expect("expected detail")
+            .contains("readable partial file")
+    );
+    assert!(
+        diagnostic["found"]
+            .as_str()
+            .expect("found detail")
+            .contains("_missing.mustache")
     );
 }
 
@@ -1103,6 +1221,19 @@ fn parse_command_json_groups_errors_and_warnings() {
         error_json["inputs"][0]["warnings"],
         Value::Array(Vec::new())
     );
+}
+
+#[test]
+fn parse_command_json_includes_structured_diagnostic_details() {
+    let output = smoothe_with_stdin(&["parse", "--json", "-"], "Hello {{name");
+    let json = json_stdout(&output);
+    let diagnostic = &json["inputs"][0]["errors"][0];
+
+    assert!(!output.status.success());
+    assert_eq!(diagnostic["issue"], "MalformedTag");
+    assert_eq!(diagnostic["expected"], "closing delimiter `}}`");
+    assert_eq!(diagnostic["found"], "end of input");
+    assert_eq!(diagnostic["expectation_source"], "parser delimiters");
 }
 
 #[test]
