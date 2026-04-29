@@ -23,9 +23,8 @@ starting line number, parsed AST, and parser state including diagnostics.
 ### Requirement: Frontmatter Is Handled Outside Parser
 
 The system SHALL extract and parse frontmatter before invoking the Mustache
-parser for primary templates, and SHALL prepare partial template bodies by
-detecting and skipping frontmatter before partial parsing. The parser SHALL
-parse only template bodies using caller-provided source position metadata.
+parser, and the parser SHALL parse only the template body using caller-provided
+source position metadata.
 
 #### Scenario: Frontmatter is skipped during template parsing
 
@@ -45,25 +44,12 @@ parse only template bodies using caller-provided source position metadata.
 - **THEN** frontmatter context is exposed by the content result rather than by
   parser state.
 
-#### Scenario: Partial frontmatter is skipped during partial parsing
+#### Scenario: Content diagnostic preserves source context
 
-- **WHEN** a resolved partial file starts with frontmatter followed by Mustache
-  content
-- **THEN** the parsed partial AST contains nodes only for the Mustache content
-  after the partial frontmatter block.
-
-#### Scenario: Partial frontmatter is not merged into parent context
-
-- **WHEN** a resolved partial file contains frontmatter
-- **THEN** the parent template content result exposes only the parent
-  frontmatter context.
-
-#### Scenario: Partial diagnostics use original partial source locations
-
-- **WHEN** parsing reports a diagnostic for content after a partial
-  frontmatter block
-- **THEN** the diagnostic line and column are calculated relative to the
-  original partial file, not relative to a stripped partial body string.
+- **WHEN** content processing emits a diagnostic for frontmatter or includes
+  handling
+- **THEN** the diagnostic identifies the source file and can include structured
+  context about the content metadata that caused it.
 
 ### Requirement: Frontmatter Context Extraction
 The system SHALL parse supported frontmatter formats into content frontmatter

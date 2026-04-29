@@ -3,7 +3,6 @@
 ## Purpose
 Define JSON output mode for the parse command, including AST projection and
 diagnostic grouping.
-
 ## Requirements
 ### Requirement: Parse Command JSON Flag
 The system SHALL provide a JSON output mode for the `parse` command using both
@@ -59,23 +58,36 @@ structured fields.
 - **THEN** the JSON result represents the AST as an empty node list.
 
 ### Requirement: JSON Diagnostics Projection
+
 The system SHALL include parser diagnostics in JSON mode as structured lists
-grouped by severity.
+grouped by severity, preserving both core diagnostic fields and optional
+structured detail data.
 
 #### Scenario: Error diagnostics are grouped
+
 - **WHEN** parsing produces one or more error diagnostics in JSON mode
 - **THEN** the input result includes those diagnostics in an `errors` list.
 
 #### Scenario: Warning diagnostics are grouped
+
 - **WHEN** parsing produces one or more warning diagnostics in JSON mode
 - **THEN** the input result includes those diagnostics in a `warnings` list.
 
 #### Scenario: Diagnostics include location and message
+
 - **WHEN** a diagnostic appears in the `errors` or `warnings` list
 - **THEN** the diagnostic object includes the issue kind, source name, line,
   column, span, and message.
 
+#### Scenario: Diagnostics include structured details
+
+- **WHEN** a diagnostic has expected, found, note, suggestion, or related
+  location details
+- **THEN** the diagnostic object includes those details in optional structured
+  fields.
+
 #### Scenario: No diagnostics uses empty lists
+
 - **WHEN** parsing produces no error or warning diagnostics in JSON mode
 - **THEN** the input result includes empty `errors` and `warnings` lists.
 
@@ -90,3 +102,4 @@ mode.
 #### Scenario: Warnings do not cause failure
 - **WHEN** parsing in JSON mode produces warnings but no error diagnostics
 - **THEN** the command exits successfully.
+

@@ -131,14 +131,20 @@ The system SHALL validate core Mustache structure while parsing.
 
 ### Requirement: Parser Diagnostics
 
-The system SHALL produce structured diagnostics and safe partial results for
-recoverable parse errors and incomplete partial graph resolution.
+The system SHALL produce structured diagnostics with optional detail data and
+safe partial results for recoverable parse errors.
 
 #### Scenario: Diagnostics include source location
 
 - **WHEN** the parser emits a diagnostic for source text with filename metadata
 - **THEN** the diagnostic includes filename, line, column, issue type, severity,
-  and message.
+  span, and message.
+
+#### Scenario: Diagnostics can include structured details
+
+- **WHEN** parser context provides expected values, found values, notes,
+  suggestions, or related locations for a diagnostic
+- **THEN** the diagnostic preserves that context as structured detail data.
 
 #### Scenario: Feedback handler receives diagnostics
 
@@ -151,17 +157,4 @@ recoverable parse errors and incomplete partial graph resolution.
 - **WHEN** parsing encounters recoverable syntax errors after some nodes were
   parsed
 - **THEN** the parser returns safe parsed AST fragments and diagnostics.
-
-#### Scenario: Unresolved static partial reports error
-
-- **WHEN** the parser encounters a static partial reference that cannot be
-  resolved through the effective partial mapping
-- **THEN** the parser emits an error diagnostic with filename, line, column,
-  issue type, and message.
-
-#### Scenario: Partial parse diagnostic uses partial file
-
-- **WHEN** parsing a resolved partial produces a diagnostic
-- **THEN** the diagnostic source location refers to the partial file rather than
-  the referring template.
 
