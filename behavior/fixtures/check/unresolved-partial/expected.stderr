@@ -1,0 +1,1 @@
+template.mustache:1:7: error: UnresolvedPartial: unresolved partial `missing`; expected: configured partial mapping; found: missing; source: partial mappings

@@ -1,0 +1,6 @@
+[check]
+verbosity = "debug"
+
+[check.partials]
+header = "partials/header.mustache"
+

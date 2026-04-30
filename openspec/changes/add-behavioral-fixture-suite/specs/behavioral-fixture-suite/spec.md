@@ -16,25 +16,35 @@ command-line utility rather than through internal Rust APIs.
 - **THEN** it uses process exit status, stdout, stderr, and filesystem inputs
   rather than parser or checker internals.
 
-#### Scenario: Behavioral suite runs under Rust test runner
+#### Scenario: Behavioral suite is separate from normal Rust tests
 
-- **WHEN** the project test suite runs
-- **THEN** the behavioral fixture suite is executed by the configured Rust test
-  harness.
+- **WHEN** the normal Rust test suite runs
+- **THEN** the behavioral fixture suite is not executed as part of that suite.
 
-### Requirement: Trycmd-Based Initial Runner
+#### Scenario: Behavioral suite runs through explicit command
 
-The system SHALL start the behavioral fixture suite using `trycmd` as the
-initial CLI fixture runner.
+- **WHEN** a developer wants to run behavioral fixtures
+- **THEN** they invoke `cargo behave`.
 
-#### Scenario: Trycmd executes fixture cases
+### Requirement: Behave-Based Initial Runner
 
-- **WHEN** the behavioral test entry point runs
-- **THEN** it uses `trycmd` to discover and execute behavioral fixture cases.
+The system SHALL start the behavioral fixture suite with a custom `cargo
+behave` command.
+
+#### Scenario: Behave executes fixture cases
+
+- **WHEN** the behavioral runner command runs
+- **THEN** it discovers and executes behavioral fixture cases.
+
+#### Scenario: Runner may use fixture libraries
+
+- **WHEN** the custom runner is implemented
+- **THEN** it may use `trycmd`, `snapbox`, or a thin custom harness internally
+  while preserving the `cargo behave` command surface.
 
 #### Scenario: Runner can be reevaluated
 
-- **WHEN** `trycmd` cannot support required fixture behavior such as
+- **WHEN** the initial runner cannot support required fixture behavior such as
   normalization or structured JSON comparison
 - **THEN** the project may replace or supplement it with `snapbox` or a thin
   custom runner without changing the black-box fixture contract.
@@ -42,6 +52,27 @@ initial CLI fixture runner.
 ### Requirement: Behavioral Fixture Layout
 
 The system SHALL define a repeatable fixture layout for black-box CLI cases.
+
+#### Scenario: Fixture hierarchy avoids Rust test discovery
+
+- **WHEN** the behavioral fixture hierarchy is created
+- **THEN** it is not automatically discovered as a standard Rust integration
+  test suite.
+
+#### Scenario: Fixture discovery uses case manifests
+
+- **WHEN** the behavioral runner discovers cases
+- **THEN** it finds fixture manifests matching `behavior/fixtures/**/case.toml`.
+
+#### Scenario: Fixture case has named directory
+
+- **WHEN** a behavioral fixture is added
+- **THEN** the fixture files are stored in a directory named after the test case.
+
+#### Scenario: Fixture paths are case-relative
+
+- **WHEN** `case.toml` references input or expected-output files
+- **THEN** those paths are resolved relative to the fixture case directory.
 
 #### Scenario: Fixture defines command behavior
 
@@ -53,6 +84,12 @@ The system SHALL define a repeatable fixture layout for black-box CLI cases.
 
 - **WHEN** a behavioral fixture needs project configuration
 - **THEN** it includes a configuration file consumed by the `smoothe` command.
+
+#### Scenario: Fixture config is passed explicitly
+
+- **WHEN** a behavioral fixture includes a `smoothe` config file
+- **THEN** the runner passes that config to `smoothe` explicitly, such as with
+  `--config`.
 
 #### Scenario: Fixture can include template inputs
 
@@ -68,6 +105,24 @@ The system SHALL define a repeatable fixture layout for black-box CLI cases.
 
 - **WHEN** a behavioral fixture needs partial templates
 - **THEN** it includes those partials as filesystem inputs to the command.
+
+#### Scenario: Fixture covers explicit partial mappings
+
+- **WHEN** a behavioral fixture validates configured partials
+- **THEN** it provides partial mappings through fixture-local configuration.
+
+#### Scenario: Configured partial mappings remain template-relative
+
+- **WHEN** a behavioral fixture validates configured partials from a config file
+  outside the template directory
+- **THEN** relative configured partial paths are resolved relative to the
+  template file that includes them, not relative to the config file.
+
+#### Scenario: Fixture covers frontmatter partial includes
+
+- **WHEN** a behavioral fixture validates frontmatter partials
+- **THEN** it provides template frontmatter `includes` and the corresponding
+  partial files.
 
 ### Requirement: Output Normalization
 
@@ -162,3 +217,20 @@ cases to full end-to-end semantic cases.
 - **WHEN** schema, lambda, partial, diagnostic, and machine-readable output
   capabilities are implemented
 - **THEN** behavioral fixtures can cover those features end to end.
+
+### Requirement: Optional Library Integration Exploration
+
+The behavioral fixture suite SHALL keep the initial behavioral contract
+CLI-oriented. The design may explore closer integration with `smoothe` as a
+library, but library integration is optional.
+
+#### Scenario: Library integration is evaluated
+
+- **WHEN** the behavioral runner design is refined
+- **THEN** maintainers may evaluate whether loading `smoothe` as a library helps
+  setup, fixture generation, or performance.
+
+#### Scenario: Library integration is not required
+
+- **WHEN** the initial behavioral suite is implemented
+- **THEN** it can run entirely by invoking the `smoothe` command-line utility.

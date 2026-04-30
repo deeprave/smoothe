@@ -1,10 +1,13 @@
 use std::{
+    collections::BTreeMap,
     env, fs, io,
     path::{Path, PathBuf},
 };
 
 use clap::{ColorChoice, ValueEnum};
 use serde::Deserialize;
+
+use crate::parser::PartialMapping;
 
 const CONFIG_FILE_NAME: &str = "smoothe.toml";
 
@@ -29,6 +32,8 @@ pub struct CheckConfig {
     lambdas: Option<String>,
     output: Option<CheckOutputFormat>,
     verbosity: Option<CheckVerbosity>,
+    #[serde(default)]
+    partials: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +45,7 @@ pub struct ResolvedGlobalOptions {
 pub struct ResolvedCheckOptions {
     pub schema: SemanticInput,
     pub lambdas: SemanticInput,
+    pub partials: Vec<PartialMapping>,
     pub output: CheckOutputFormat,
     pub verbosity: CheckVerbosity,
 }
@@ -49,6 +55,7 @@ impl Default for ResolvedCheckOptions {
         Self {
             schema: SemanticInput::Disabled,
             lambdas: SemanticInput::Disabled,
+            partials: Vec::new(),
             output: CheckOutputFormat::Compiler,
             verbosity: CheckVerbosity::Warning,
         }
@@ -145,6 +152,7 @@ impl Configuration {
         ResolvedCheckOptions {
             schema: self.resolve_semantic_input(self.check.schema.as_deref()),
             lambdas: self.resolve_semantic_input(self.check.lambdas.as_deref()),
+            partials: self.resolve_partial_mappings(),
             output: self.check.output.unwrap_or(CheckOutputFormat::Compiler),
             verbosity: self.check.verbosity.unwrap_or(CheckVerbosity::Warning),
         }
@@ -168,6 +176,14 @@ impl Configuration {
             Some(source_dir) => SemanticInput::Path(source_dir.join(path)),
             None => SemanticInput::Path(path),
         }
+    }
+
+    fn resolve_partial_mappings(&self) -> Vec<PartialMapping> {
+        self.check
+            .partials
+            .iter()
+            .map(|(name, path)| PartialMapping::new(name.clone(), PathBuf::from(path)))
+            .collect()
     }
 }
 

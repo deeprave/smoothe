@@ -1,0 +1,6 @@
+error: failed to parse configuration smoothe.toml: TOML parse error at line 1, column 5
+  |
+1 | not toml =
+  |     ^
+key with no value, expected `=`
+

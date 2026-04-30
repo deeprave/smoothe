@@ -1,0 +1,2 @@
+[alias]
+behave = "run --bin cargo-behave --"

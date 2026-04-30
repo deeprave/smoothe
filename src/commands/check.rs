@@ -65,6 +65,7 @@ pub fn check(
             source = source.with_root(root);
         }
         let mut content_input = ContentInput::new(source, &input.source);
+        content_input.partials = check_options.partials.clone();
         content_input.lambdas = lambdas.values().cloned().collect();
         let result = process_template(content_input);
         let mut input_has_error = false;

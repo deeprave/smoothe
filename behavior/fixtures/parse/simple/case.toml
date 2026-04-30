@@ -1,0 +1,3 @@
+args = ["parse", "template.mustache"]
+status = 0
+stdout = "expected.stdout"

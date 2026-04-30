@@ -1,0 +1,4 @@
+args = ["check", "template.mustache"]
+status = 1
+stderr = "expected.stderr"
+

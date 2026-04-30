@@ -1,0 +1,2 @@
+partial: debug: partial-started: header pages/partials/header.mustache
+partial: debug: partial-finished: header pages/partials/header.mustache

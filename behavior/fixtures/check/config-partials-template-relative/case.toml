@@ -1,0 +1,5 @@
+config = "config/smoothe.toml"
+args = ["check", "pages/template.mustache"]
+status = 0
+stderr = "expected.stderr"
+

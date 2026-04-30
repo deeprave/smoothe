@@ -1,0 +1,1 @@
+template.mustache:1:1: warning: InvalidLambdaUsage: lambda `markdown` is not valid as a variable; expected: section lambda usage; found: variable lambda usage; source: lambda definitions; notes: side effects: none

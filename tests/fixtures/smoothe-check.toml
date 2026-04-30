@@ -1,3 +1,6 @@
 [check]
 schema = "schemas/context.json"
 lambdas = "lambdas/known.json"
+
+[check.partials]
+header = "partials/header.mustache"

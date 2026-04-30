@@ -1,0 +1,4 @@
+args = ["check", "--schema", "schema.json", "template.mustache"]
+status = 0
+stderr = "expected.stderr"
+

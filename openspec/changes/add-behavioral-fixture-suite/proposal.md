@@ -9,12 +9,26 @@ lambdas, partials, and expected outputs.
 ## What Changes
 
 - Add a behavioral fixture suite for the `smoothe` CLI.
-- Start with `trycmd` as the fixture runner and evaluate whether it covers the
-  full end-to-end testing need.
+- Start with a custom `cargo behave` command and evaluate whether libraries
+  such as `trycmd` or `snapbox` are useful internally.
+- Keep the behavioral suite separate from the normal Rust test suite; it shall
+  not run as part of `cargo nextest run`.
+- Provide an explicit `cargo behave` command to run the behavioral suite on
+  demand.
 - Keep behavioral tests black-box: run the utility through command-line options
   rather than importing internal Rust modules.
-- Define a fixture layout for commands, config files, templates, schemas,
+- Explore closer integration with `smoothe`, including whether loading the
+  project as a library would be useful, but do not require this for the initial
+  suite.
+- Define a fixture layout where each test case lives in a directory named after
+  the case and contains a `case.toml`, config files, templates, schemas,
   lambdas, partials, expected stdout, expected stderr, and expected exit codes.
+- Discover fixture cases by filesystem pattern, initially
+  `behavior/fixtures/**/case.toml`.
+- Run cases with their own purpose-built config files, passed explicitly to
+  `smoothe` with `--config` where applicable.
+- Cover partial templates supplied by explicit config mappings and by template
+  frontmatter `includes`.
 - Cover behavioral consistency, functionality, and compliance with intended
   command behavior.
 - Support output normalization where needed, especially paths and line endings.
@@ -39,8 +53,11 @@ lambdas, partials, and expected outputs.
 
 ## Impact
 
-- Adds a dev/test dependency or runner integration, starting with `trycmd`.
-- Adds behavioral fixture files and a test harness entry point.
+- Adds a dev/test dependency or runner integration, starting with a custom
+  `cargo behave` command.
+- Adds behavioral fixture files and an opt-in behavioral runner command.
 - Does not require test fixtures to know about parser or checker internals.
-- May later switch to `snapbox` or a thin custom runner if `trycmd` cannot
-  support the required fixture layout, normalization, or structured comparison.
+- Does not add a `tests/` entry point that runs with the normal Rust test suite.
+- May later adopt `trycmd`, `snapbox`, or additional custom runner code if the
+  initial implementation cannot support the required fixture layout,
+  normalization, or structured comparison.

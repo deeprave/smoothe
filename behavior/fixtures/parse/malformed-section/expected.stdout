@@ -1,0 +1,5 @@
+input template.mustache
+  section name="items" span=0..21 children=3
+    text value="\n" span=10..11
+    escaped_variable name="name" span=11..19
+    text value="\n\n" span=19..21

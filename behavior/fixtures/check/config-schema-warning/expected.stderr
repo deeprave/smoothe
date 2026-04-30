@@ -1,0 +1,1 @@
+template.mustache:1:7: warning: MissingSchemaPath: missing schema path `user.email`; known fields: name; expected: one of schema fields name; found: user.email; source: context schema

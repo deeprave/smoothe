@@ -1,0 +1,4 @@
+args = ["check", "--lambdas", "lambdas.json", "template.mustache"]
+status = 0
+stderr = "expected.stderr"
+

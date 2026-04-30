@@ -1,0 +1,1 @@
+template.mustache:1:7: warning: MissingSchemaPath: missing schema path `nmae`; known fields: name; expected: one of schema fields name; found: nmae; source: context schema; suggestions: name

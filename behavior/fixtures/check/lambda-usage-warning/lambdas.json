@@ -1,0 +1,15 @@
+{
+  "lambdas": {
+    "markdown": {
+      "usage": "section",
+      "argument": {
+        "type": "string"
+      },
+      "returns": {
+        "type": "string"
+      },
+      "side_effects": "none"
+    }
+  }
+}
+

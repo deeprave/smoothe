@@ -101,7 +101,7 @@ fn check_semantic_inputs_accept_none_case_insensitively() {
 }
 
 #[test]
-fn check_semantic_input_paths_resolve_relative_to_config_file() {
+fn check_semantic_inputs_resolve_relative_to_config_file_but_partial_mappings_do_not() {
     let config = config::load(Some(std::path::Path::new(
         "tests/fixtures/smoothe-check.toml",
     )))
@@ -119,6 +119,12 @@ fn check_semantic_input_paths_resolve_relative_to_config_file() {
     assert_eq!(
         options.check.lambdas,
         config::SemanticInput::Path("tests/fixtures/lambdas/known.json".into())
+    );
+    assert_eq!(options.check.partials.len(), 1);
+    assert_eq!(options.check.partials[0].name, "header");
+    assert_eq!(
+        options.check.partials[0].path,
+        std::path::PathBuf::from("partials/header.mustache")
     );
 }
 

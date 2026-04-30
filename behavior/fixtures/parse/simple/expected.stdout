@@ -1,0 +1,4 @@
+input template.mustache
+  text value="Hello " span=0..6
+  escaped_variable name="name" span=6..14
+  text value="\n" span=14..15

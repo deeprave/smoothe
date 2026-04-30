@@ -1,0 +1,34 @@
+{
+  "has_error": false,
+  "errors": [],
+  "warnings": [],
+  "info": [],
+  "debug": [],
+  "inputs": [
+    {
+      "source": "template.mustache",
+      "has_error": false,
+      "errors": [],
+      "warnings": [
+        {
+          "level": "warning",
+          "severity": "warning",
+          "issue": "MissingSchemaPath",
+          "source": "template.mustache",
+          "line": 1,
+          "column": 7,
+          "span": {
+            "start": 6,
+            "end": 20
+          },
+          "message": "missing schema path `user.email`; known fields: name",
+          "expected": "one of schema fields name",
+          "found": "user.email",
+          "expectation_source": "context schema"
+        }
+      ],
+      "info": [],
+      "debug": []
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+args = ["check", "--json", "--schema", "schema.json", "template.mustache"]
+status = 0
+stdout = "expected.stdout.json"
+stdout_format = "json"
