@@ -149,11 +149,6 @@ fn resolve_check_output_format(
     args: &CheckArgs,
     options: &ResolvedCheckOptions,
 ) -> CheckOutputFormat {
-    // Precedence is intentionally explicit: --format is the exact selector,
-    // --json/--no-json only change the configured default.
-    if let Some(format) = args.format {
-        return format;
-    }
     if args.json {
         return CheckOutputFormat::Json;
     }

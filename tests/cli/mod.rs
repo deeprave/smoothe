@@ -298,33 +298,6 @@ fn check_command_json_outputs_run_level_diagnostics() {
 }
 
 #[test]
-fn check_command_accepts_format_selection() {
-    let dir = temp_dir();
-    let template = write_template(&dir, "template.mustache", "Hello {{name}}");
-
-    let compiler = smoothe()
-        .arg("check")
-        .arg("--format")
-        .arg("compiler")
-        .arg(&template)
-        .output()
-        .expect("run smoothe");
-    assert!(compiler.status.success());
-    assert!(compiler.stdout.is_empty());
-
-    let json = smoothe()
-        .arg("check")
-        .arg("--format")
-        .arg("json")
-        .arg(&template)
-        .output()
-        .expect("run smoothe");
-    assert!(json.status.success());
-    assert!(json.stderr.is_empty());
-    assert!(json_stdout(&json)["inputs"].is_array());
-}
-
-#[test]
 fn check_command_json_flags_override_configured_default_output() {
     let dir = temp_dir();
     let home = temp_dir();
@@ -350,17 +323,6 @@ fn check_command_json_flags_override_configured_default_output() {
     assert!(json.status.success());
     assert!(json.stderr.is_empty());
     assert!(json_stdout(&json)["inputs"].is_array());
-}
-
-#[test]
-fn check_command_format_overrides_json_default_flags() {
-    let output = smoothe_with_stdin(
-        &["check", "--json", "--format", "compiler", "-"],
-        "{{name}}",
-    );
-
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
 }
 
 #[test]
@@ -476,8 +438,7 @@ fn check_command_uses_configured_json_output_and_cli_override() {
 
     let overridden = smoothe_with_isolated_config(&dir, &home)
         .arg("check")
-        .arg("--format")
-        .arg("compiler")
+        .arg("--no-json")
         .arg(&template)
         .output()
         .expect("run smoothe");

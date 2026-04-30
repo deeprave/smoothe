@@ -41,23 +41,16 @@ pub struct CheckArgs {
         long,
         short = 'j',
         conflicts_with = "no_json",
-        help = "Use JSON output by default unless --format explicitly selects another output"
+        help = "Use JSON output"
     )]
     pub json: bool,
 
     #[arg(
         long = "no-json",
         conflicts_with = "json",
-        help = "Use compiler-style output by default unless --format explicitly selects another output"
+        help = "Use compiler-style output"
     )]
     pub no_json: bool,
-
-    #[arg(
-        long,
-        value_name = "FORMAT",
-        help = "Select the output format explicitly; overrides --json and --no-json"
-    )]
-    pub format: Option<config::CheckOutputFormat>,
 
     #[arg(
         long,

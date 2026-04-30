@@ -196,21 +196,10 @@ format.
 - **WHEN** the user runs `smoothe check --json template.mustache`
 - **THEN** the CLI selects JSON output for the check command.
 
-#### Scenario: Check accepts output format option
-
-- **WHEN** the user runs `smoothe check --format json template.mustache`
-- **THEN** the CLI selects JSON output for the check command.
-
-#### Scenario: Check accepts compiler output format
-
-- **WHEN** the user runs `smoothe check --format compiler template.mustache`
-- **THEN** the CLI selects compiler-style output for the check command.
-
 #### Scenario: Check accepts no-json flag
 
 - **WHEN** the user runs `smoothe check --no-json template.mustache`
-- **THEN** the CLI selects compiler-style output as the default for the check
-  command.
+- **THEN** the CLI selects compiler-style output for the check command.
 
 #### Scenario: JSON flags override configured default output
 
@@ -219,11 +208,6 @@ format.
 - **THEN** the CLI selects JSON output for the check command.
 - **GIVEN** `[check] output = "json"` is configured
 - **WHEN** the user runs `smoothe check --no-json template.mustache`
-- **THEN** the CLI selects compiler-style output for the check command.
-
-#### Scenario: Explicit format overrides JSON default flags
-
-- **WHEN** the user runs `smoothe check --json --format compiler template.mustache`
 - **THEN** the CLI selects compiler-style output for the check command.
 
 #### Scenario: JSON default flags conflict with each other
@@ -265,4 +249,3 @@ displayed event verbosity.
 
 - **WHEN** the user runs `smoothe check --verbosity verbose template.mustache`
 - **THEN** the CLI rejects the invalid verbosity.
-

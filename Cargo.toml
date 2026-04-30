@@ -2,6 +2,13 @@
 name = "smoothe"
 version = "0.1.0"
 edition = "2024"
+authors = ["David L Nugent <davidn@uniquode.io>"]
+description = "A command-line companion for checking and inspecting Mustache templates."
+license = "MIT"
+repository = "https://github.com/deeprave/smoothe"
+readme = "README.md"
+keywords = ["mustache", "templates", "lint", "cli", "parser"]
+categories = ["command-line-utilities", "development-tools", "template-engine"]
 
 [dependencies]
 clap = { version = "4.5.49", features = ["derive"] }

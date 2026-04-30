@@ -158,7 +158,7 @@ The system SHALL allow check output format defaults to be configured in the
 #### Scenario: CLI output overrides config output
 
 - **WHEN** `[check] output = "json"` is configured and the user runs
-  `smoothe check --format compiler template.mustache`
+  `smoothe check --no-json template.mustache`
 - **THEN** the check command uses compiler-style output.
 
 ### Requirement: Check Verbosity Configuration
@@ -182,4 +182,3 @@ in the `[check]` configuration section.
 
 - **WHEN** `[check] verbosity` contains an unsupported value
 - **THEN** configuration loading reports a configuration error.
-
