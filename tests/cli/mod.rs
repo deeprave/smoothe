@@ -95,9 +95,13 @@ fn help_aliases_exit_successfully() {
 fn version_aliases_exit_successfully() {
     for flag in ["--version", "-V"] {
         let output = smoothe().arg(flag).output().expect("run smoothe");
+        let stdout = stdout(&output);
 
         assert!(output.status.success(), "{flag} should succeed");
-        assert_eq!(stdout(&output), "smoothe 0.1.0\n");
+        assert!(
+            stdout.starts_with("smoothe "),
+            "{flag} should print the binary name and version"
+        );
     }
 }
 

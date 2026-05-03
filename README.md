@@ -125,9 +125,9 @@ header = "partials/header.mustache"
 footer = "partials/footer.mustache"
 ```
 
-Partial paths are resolved relative to the template file that includes them. If
-Smoothe is checking template content without a template file path, it falls back
-to the current working directory.
+Configuration partial paths are resolved relative to the configuration file that
+declares them. Template frontmatter includes are resolved relative to the
+template file that declares the frontmatter.
 
 Frontmatter can declare includes near the template that uses them:
 
@@ -142,6 +142,9 @@ Hello {{name}}
 
 Smoothe parses reachable static partials as part of the template graph and can
 report unresolved, unreadable, nested, and recursive partial references.
+When a configured or frontmatter partial path does not already use an
+underscore-prefixed filename, Smoothe looks for the underscore-prefixed
+filename, such as `partials/_header.mustache` for `partials/header.mustache`.
 
 ## Configuration
 

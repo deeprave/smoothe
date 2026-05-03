@@ -17,6 +17,8 @@ pub struct Configuration {
     options: GlobalConfig,
     #[serde(default)]
     check: CheckConfig,
+    // Set only after loading from a config file; when present it must be
+    // absolute so config-relative paths never depend on later CWD changes.
     #[serde(skip)]
     source_dir: Option<PathBuf>,
 }
@@ -148,14 +150,14 @@ impl Configuration {
         ResolvedGlobalOptions { color }
     }
 
-    fn resolve_check_options(&self) -> ResolvedCheckOptions {
-        ResolvedCheckOptions {
+    fn resolve_check_options(&self) -> Result<ResolvedCheckOptions, ConfigError> {
+        Ok(ResolvedCheckOptions {
             schema: self.resolve_semantic_input(self.check.schema.as_deref()),
             lambdas: self.resolve_semantic_input(self.check.lambdas.as_deref()),
-            partials: self.resolve_partial_mappings(),
+            partials: self.resolve_partial_mappings()?,
             output: self.check.output.unwrap_or(CheckOutputFormat::Compiler),
             verbosity: self.check.verbosity.unwrap_or(CheckVerbosity::Warning),
-        }
+        })
     }
 
     fn resolve_semantic_input(&self, value: Option<&str>) -> SemanticInput {
@@ -178,12 +180,47 @@ impl Configuration {
         }
     }
 
-    fn resolve_partial_mappings(&self) -> Vec<PartialMapping> {
+    fn resolve_partial_mappings(&self) -> Result<Vec<PartialMapping>, ConfigError> {
         self.check
             .partials
             .iter()
-            .map(|(name, path)| PartialMapping::new(name.clone(), PathBuf::from(path)))
+            .map(|(name, path)| self.resolve_partial_mapping(name.clone(), path))
             .collect()
+    }
+
+    fn resolve_partial_mapping(
+        &self,
+        name: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<PartialMapping, ConfigError> {
+        self.resolve_partial_path(path.as_ref())
+            .map(|path| PartialMapping::from_partial_path(name, path))
+    }
+
+    fn resolve_partial_path(&self, path: &Path) -> Result<PathBuf, ConfigError> {
+        if path.is_absolute() {
+            return Ok(path.to_owned());
+        }
+
+        let Some(source_dir) = &self.source_dir else {
+            return Ok(path.to_owned());
+        };
+
+        // `source_dir` is normalized by `config_source_dir` when the
+        // configuration is loaded. Keep this guard as a defensive invariant
+        // check so partials never silently fall back to the process CWD.
+        debug_assert!(
+            source_dir.is_absolute(),
+            "configuration source directory should be normalized before partial resolution"
+        );
+        if !source_dir.is_absolute() {
+            return Err(ConfigError::relative_source_dir(source_dir));
+        }
+
+        // Partial paths are resolved relative to the config file directory,
+        // but this is not a sandbox boundary: explicit `..` components remain
+        // part of the caller-provided path.
+        Ok(source_dir.join(path))
     }
 }
 
@@ -209,7 +246,10 @@ pub fn load(explicit_path: Option<&Path>) -> Result<Configuration, ConfigError> 
     Ok(Configuration::default())
 }
 
-pub fn resolve(configuration: &Configuration, cli: &CliGlobalOptions) -> ResolvedOptions {
+pub fn resolve(
+    configuration: &Configuration,
+    cli: &CliGlobalOptions,
+) -> Result<ResolvedOptions, ConfigError> {
     resolve_with_environment(
         configuration,
         cli,
@@ -223,11 +263,11 @@ pub fn resolve_with_environment(
     configuration: &Configuration,
     cli: &CliGlobalOptions,
     environment: EnvironmentOptions,
-) -> ResolvedOptions {
-    ResolvedOptions {
+) -> Result<ResolvedOptions, ConfigError> {
+    Ok(ResolvedOptions {
         global: configuration.resolve_global_options(cli, environment.nocolor),
-        check: configuration.resolve_check_options(),
-    }
+        check: configuration.resolve_check_options()?,
+    })
 }
 
 fn read_config(path: &Path) -> Result<Option<Configuration>, ConfigError> {
@@ -249,8 +289,25 @@ fn read_explicit_config(path: &Path) -> Result<Configuration, ConfigError> {
 fn parse_config_source(path: &Path, source: &str) -> Result<Configuration, ConfigError> {
     let mut configuration: Configuration =
         toml::from_str(source).map_err(|error| ConfigError::parse(path, error))?;
-    configuration.source_dir = path.parent().map(Path::to_owned);
+    configuration.source_dir = config_source_dir(path)?;
     Ok(configuration)
+}
+
+fn config_source_dir(path: &Path) -> Result<Option<PathBuf>, ConfigError> {
+    let Some(source_dir) = path.parent() else {
+        return Ok(None);
+    };
+
+    // Absolute config paths already identify their source directory without
+    // consulting the process working directory.
+    if source_dir.is_absolute() {
+        return Ok(Some(source_dir.to_owned()));
+    }
+
+    // Relative config paths are interpreted from the process working directory,
+    // matching how the path was supplied during discovery or explicit loading.
+    let current_dir = env::current_dir().map_err(ConfigError::current_dir)?;
+    Ok(Some(current_dir.join(source_dir)))
 }
 
 fn discovery_paths() -> Vec<PathBuf> {
@@ -280,6 +337,14 @@ enum ConfigErrorKind {
         path: PathBuf,
         source: toml::de::Error,
     },
+    CurrentDir {
+        source: io::Error,
+    },
+    // Internal invariant violation: loaded configurations should always store
+    // an absolute source directory before option resolution.
+    RelativeSourceDir {
+        path: PathBuf,
+    },
 }
 
 impl ConfigError {
@@ -297,6 +362,20 @@ impl ConfigError {
             kind: ConfigErrorKind::Parse {
                 path: path.to_owned(),
                 source,
+            },
+        }
+    }
+
+    fn current_dir(source: io::Error) -> Self {
+        Self {
+            kind: ConfigErrorKind::CurrentDir { source },
+        }
+    }
+
+    fn relative_source_dir(path: &Path) -> Self {
+        Self {
+            kind: ConfigErrorKind::RelativeSourceDir {
+                path: path.to_owned(),
             },
         }
     }
@@ -319,6 +398,20 @@ impl std::fmt::Display for ConfigError {
                     "failed to parse configuration {}: {}",
                     path.display(),
                     source
+                )
+            }
+            ConfigErrorKind::CurrentDir { source } => {
+                write!(
+                    formatter,
+                    "failed to determine current directory while resolving configuration source directory: {}",
+                    source
+                )
+            }
+            ConfigErrorKind::RelativeSourceDir { path } => {
+                write!(
+                    formatter,
+                    "internal configuration error: source directory must be absolute for partial path resolution: {}; please file a bug",
+                    path.display()
                 )
             }
         }
