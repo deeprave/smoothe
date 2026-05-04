@@ -18,6 +18,9 @@ The system SHALL periodically remove any unused fixtures.
 The system SHALL preserve behavioral coverage when tests are removed,
 consolidated, or parameterised.
 
+The system SHALL periodically inspect behavioral fixture coverage to ensure
+black-box CLI behavior remains represented by maintained fixture cases.
+
 #### Scenario: Test inventory is inspected
 
 - **WHEN** a maintenance cleanup pass begins
@@ -46,6 +49,18 @@ consolidated, or parameterised.
 - **WHEN** a test is removed or consolidated
 - **THEN** equivalent remaining coverage exists for the behavior that test
   previously checked.
+
+#### Scenario: Behavioral fixtures are inventoried
+
+- **WHEN** a maintenance cleanup pass inspects the test hierarchy
+- **THEN** behavioral fixture cases are inventoried separately from
+  implementation-focused tests.
+
+#### Scenario: Behavioral fixture coverage is preserved
+
+- **WHEN** behavioral fixtures are removed, updated, or consolidated
+- **THEN** equivalent black-box CLI coverage remains for the behavior they
+  represented.
 
 ### Requirement: Spec consolidation
 
@@ -96,4 +111,3 @@ identify duplicated, stale, or overlapping requirements across capabilities.
   same capability
 - **THEN** the overlap is consolidated into the most appropriate canonical
   capability spec.
-
