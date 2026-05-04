@@ -116,15 +116,10 @@ fn include_mapping(path: &str) -> Option<PartialMapping> {
     let include_path = PathBuf::from(path);
     let stem = include_path.file_stem()?.to_str()?;
     let key = stem.strip_prefix('_').unwrap_or(stem).to_owned();
-    let file_name = include_path.file_name()?.to_str()?;
-    let parser_file_name = if file_name.starts_with('_') {
-        file_name.to_owned()
-    } else {
-        format!("_{file_name}")
-    };
-    let mut parser_path = include_path;
-    parser_path.set_file_name(parser_file_name);
-    Some(PartialMapping::new(key, parser_path))
+    // Preserve the historical behavior of rejecting non-Unicode include
+    // filenames before constructing the partial mapping.
+    let _file_name = include_path.file_name()?.to_str()?;
+    Some(PartialMapping::from_partial_path(key, include_path))
 }
 
 fn merge_explicit_partials(derived: &mut Vec<PartialMapping>, explicit: Vec<PartialMapping>) {

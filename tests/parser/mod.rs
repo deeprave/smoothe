@@ -37,6 +37,38 @@ fn write_file(root: &Path, relative: &str, source: &str) {
     fs::write(path, source).expect("write template file");
 }
 
+#[cfg(unix)]
+#[test]
+fn normalized_partial_mapping_leaves_non_utf8_basename_unchanged() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let mut path = PathBuf::from("partials");
+    path.push(std::ffi::OsString::from_vec(vec![0x66, 0x80, b'.', b'm']));
+
+    let mapping = PartialMapping::from_partial_path("header", path);
+    let file_name = mapping
+        .path
+        .file_name()
+        .expect("normalized filename")
+        .as_bytes();
+
+    assert_eq!(file_name, &[0x66, 0x80, b'.', b'm']);
+}
+
+#[test]
+fn normalized_partial_mapping_prefixes_full_basename_before_extension() {
+    let mapping = PartialMapping::from_partial_path("header", "partials/header.mustache");
+
+    assert_eq!(mapping.path, PathBuf::from("partials/_header.mustache"));
+}
+
+#[test]
+fn normalized_partial_mapping_prefixes_dotfile_basename() {
+    let mapping = PartialMapping::from_partial_path("hidden", "partials/.mustache");
+
+    assert_eq!(mapping.path, PathBuf::from("partials/_.mustache"));
+}
+
 #[test]
 fn parses_core_nodes_with_source_spans() {
     let result = parse_template("hello {{name}} {{{raw}}} {{& other}} {{! note }}");

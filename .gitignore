@@ -2,8 +2,15 @@
 .claude
 .kiro
 .codex
+.todo/
+.cursor/
+.gemini/
+.github/prompts/
+.github/skills/
+.windsurf/
+
 .guide.yaml
 
 .idea/
 .openspec-version.txt
-.todo/
+

@@ -56,17 +56,18 @@ For `check` cases, fixture-local config may supply explicit partial mappings:
 header = "partials/header.mustache"
 ```
 
-Relative partial mapping paths are resolved by `smoothe` relative to the
-template file that includes the partial, with the current working directory as
-fallback when no template file path is available. The config file directory is
-not used as the base for partial mapping paths.
+Relative partial mapping paths in fixture-local config files are resolved by
+`smoothe` relative to the config file directory. Template frontmatter
+`includes` remain relative to the template file that declares them.
 
 Set `stdout_format = "json"` or `stderr_format = "json"` to compare a stream as
 parsed JSON instead of raw text.
 
 Partial fixtures should provide the same files `smoothe` would see in normal
 use. That includes partial mappings from fixture-local config files and
-frontmatter `includes` that point at underscore-prefixed partial files.
+frontmatter `includes`; when a partial path does not already use an
+underscore-prefixed basename, `smoothe` resolves it to the underscore-prefixed
+filename.
 
 Add a behavioral fixture when the important contract is observable CLI behavior:
 arguments, configuration, filesystem inputs, exit status, stdout, stderr, or

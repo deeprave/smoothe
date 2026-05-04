@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 pub use crate::lambda::LambdaSpec;
 
@@ -67,6 +67,39 @@ impl PartialMapping {
             path: path.into(),
         }
     }
+
+    /// Construct a mapping while applying the partial filename convention used
+    /// by config-defined partials and frontmatter `includes`.
+    ///
+    /// The convention prefixes the full basename when it does not already
+    /// start with `_`: `header.mustache` becomes `_header.mustache`.
+    ///
+    /// `name` is the mapping key used by Mustache partial tags and must already
+    /// be normalized by the caller.
+    pub fn from_partial_path(name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        Self::new(name, partial_path_with_underscore_basename(path))
+    }
+}
+
+fn partial_path_with_underscore_basename(mut path: PathBuf) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path;
+    };
+
+    // Partial filenames are a textual convention. Leave non-Unicode filenames
+    // unchanged instead of applying platform-specific byte-prefix behavior.
+    let Some(file_name_str) = file_name.to_str() else {
+        return path;
+    };
+
+    if !file_name_str.starts_with('_') {
+        let mut prefixed = OsString::from("_");
+        prefixed.push(file_name);
+        path.set_file_name(prefixed);
+    }
+
+    path
 }
 
 #[derive(Default)]

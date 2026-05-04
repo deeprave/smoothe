@@ -1,6 +1,6 @@
 [package]
 name = "smoothe"
-version = "0.2.0pre1"
+version = "0.2.0-pre.1"
 edition = "2024"
 authors = ["David L Nugent <davidn@uniquode.io>"]
 description = "A command-line companion for checking and inspecting Mustache templates."

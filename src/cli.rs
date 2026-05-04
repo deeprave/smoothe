@@ -99,7 +99,13 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let options = config::resolve(&configuration, &cli.global_options());
+    let options = match config::resolve(&configuration, &cli.global_options()) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     commands::dispatch(cli.command, options)
 }

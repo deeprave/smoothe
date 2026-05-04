@@ -399,7 +399,81 @@ fn compare_stream(
 
 fn normalize_text(source: &str, case_dir: &Path) -> String {
     let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
-    normalized.replace(&case_dir.to_string_lossy().into_owned(), "<case>")
+
+    let case_dir_text = case_dir.to_string_lossy();
+    let canonical_case_dir = case_dir.canonicalize().ok();
+    let canonical_case_dir_text = canonical_case_dir
+        .as_ref()
+        .map(|path| path.to_string_lossy());
+
+    replace_case_paths(
+        &normalized,
+        &[
+            case_dir_text.as_ref(),
+            canonical_case_dir_text.as_deref().unwrap_or(""),
+        ],
+    )
+}
+
+fn replace_case_paths(source: &str, paths: &[&str]) -> String {
+    let mut paths: Vec<&str> = paths
+        .iter()
+        .copied()
+        .filter(|path| !path.is_empty())
+        .collect();
+    paths.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    paths.dedup();
+
+    if paths.is_empty() {
+        return source.to_owned();
+    }
+
+    paths.into_iter().fold(source.to_owned(), |text, path| {
+        replace_path_occurrences(&text, path)
+    })
+}
+
+fn replace_path_occurrences(source: &str, path: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = source[cursor..].find(path) {
+        let start = cursor + relative_start;
+        let end = start + path.len();
+
+        if is_path_match_boundary(source, start, end) {
+            result.push_str(&source[cursor..start]);
+            result.push_str("<case>");
+            cursor = end;
+        } else {
+            let character = source[start..]
+                .chars()
+                .next()
+                .expect("matched path starts at a valid character boundary");
+            let next = start + character.len_utf8();
+            result.push_str(&source[cursor..next]);
+            cursor = next;
+        }
+    }
+
+    result.push_str(&source[cursor..]);
+    result
+}
+
+fn is_path_match_boundary(source: &str, start: usize, end: usize) -> bool {
+    let has_start_boundary = source[..start]
+        .chars()
+        .next_back()
+        .is_none_or(|character| !is_path_token_character(character));
+    let has_end_boundary = source[end..].chars().next().is_none_or(|character| {
+        matches!(character, '/' | '\\') || !is_path_token_character(character)
+    });
+
+    has_start_boundary && has_end_boundary
+}
+
+fn is_path_token_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '/' | '\\' | '.' | '_' | '-')
 }
 
 fn first_text_difference(expected: &str, actual: &str) -> String {
@@ -465,4 +539,25 @@ fn smoothe_exe_name() -> OsString {
     let mut name = OsString::from("smoothe");
     name.push(std::env::consts::EXE_SUFFIX);
     name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_case_paths;
+
+    #[test]
+    fn replace_case_paths_replaces_path_and_nested_paths() {
+        assert_eq!(
+            replace_case_paths("/tmp/case/file.mustache", &["/tmp/case"]),
+            "<case>/file.mustache"
+        );
+    }
+
+    #[test]
+    fn replace_case_paths_does_not_replace_path_prefixes_inside_other_names() {
+        assert_eq!(
+            replace_case_paths("/tmp/case-other/file.mustache", &["/tmp/case"]),
+            "/tmp/case-other/file.mustache"
+        );
+    }
 }
